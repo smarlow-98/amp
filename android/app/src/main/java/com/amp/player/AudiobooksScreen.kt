@@ -63,11 +63,15 @@ fun AudiobooksScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 16.dp)
         ) { Text("Add audiobook files") }
 
+        if (vm.plexLoading) {
+            Text("Loading audiobooks from Plex.", Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        }
         if (vm.books.isEmpty()) {
             Text(
                 if (vm.localLoading) "Loading."
                 else "No audiobooks found yet. AMP finds m4b files, files marked as audiobooks, " +
-                    "and anything in a folder named Audiobooks. You can also add files with the button above.",
+                    "and anything in a folder named Audiobooks. You can also add files with the button above. " +
+                    "For Plex, name your audiobook library with the word book in it, or choose it on the Settings tab.",
                 Modifier.padding(16.dp)
             )
         }
@@ -77,10 +81,11 @@ fun AudiobooksScreen(vm: AppViewModel) {
             itemsIndexed(vm.books, key = { _, b -> b.id }) { _, b ->
                 val r = remember(version, b.id) { vm.bookResume(b) }
                 val status = bookStatus(b, r)
+                val where = if (b.fromPlex) ", from Plex" else ""
                 MediaRow(
-                    spoken = "${b.title}, by ${b.author}, $status",
+                    spoken = "${b.title}, by ${b.author}, $status$where",
                     primary = b.title,
-                    secondary = "${b.author}  •  $status",
+                    secondary = "${b.author}  •  $status" + if (b.fromPlex) "  •  Plex" else "",
                     clickLabel = "open",
                     onClick = { openId = b.id },
                     longClickLabel = if (b.added) "remove from list" else null,

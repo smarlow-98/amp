@@ -33,6 +33,7 @@ data class PlexItem(
     val partKey: String?,
     val durationMs: Long,
     val ratingKey: String,
+    val parentKey: String = "",
     val album: String = "",
     val albumArtist: String = "",
     val index: Int = 0,
@@ -242,12 +243,17 @@ class PlexClient(context: Context) {
         }
     }
 
-    fun toMediaItem(item: PlexItem, kind: String): MediaItem {
+    /** The address the player streams this item from. */
+    fun streamUri(item: PlexItem): Uri {
         val partKey = item.partKey ?: ""
         val sep = if (partKey.contains('?')) "&" else "?"
-        val uri = Uri.parse(
+        return Uri.parse(
             (serverBase ?: "") + partKey + sep + "X-Plex-Token=" + Uri.encode(serverToken ?: "")
         )
+    }
+
+    fun toMediaItem(item: PlexItem, kind: String): MediaItem {
+        val uri = streamUri(item)
         val artist = if (kind == Kind.VIDEO) item.subtitle else item.artist
         return buildMediaItem(
             id = "plex:${item.ratingKey}",
@@ -301,6 +307,7 @@ class PlexClient(context: Context) {
             partKey = partKey,
             durationMs = m.optLong("duration", 0L),
             ratingKey = m.str("ratingKey"),
+            parentKey = m.str("parentRatingKey"),
             album = if (type == "track") m.str("parentTitle") else "",
             albumArtist = if (type == "track") m.str("grandparentTitle") else "",
             index = m.optInt("index", 0),

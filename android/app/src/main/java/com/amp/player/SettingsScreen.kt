@@ -9,6 +9,13 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Switch
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
@@ -98,13 +105,14 @@ private fun ColumnScope.PlexServerList(vm: AppViewModel) {
 @Composable
 private fun PlexConnected(vm: AppViewModel) {
     Column(
-        Modifier.padding(horizontal = 16.dp),
+        Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text("Connected to ${vm.plexServerName}.")
         Text(
             if (vm.plexLoading) "Loading your Plex library."
-            else "${vm.plexSongs.size} songs, ${vm.plexMovies.size} movies, ${vm.plexShows.size} TV shows."
+            else "${vm.plexSongs.size} songs, ${vm.plexBookCount} audiobooks, " +
+                "${vm.plexMovies.size} movies, ${vm.plexShows.size} TV shows."
         )
         Button(
             onClick = vm::loadPlexLibrary,
@@ -113,5 +121,31 @@ private fun PlexConnected(vm: AppViewModel) {
         ) { Text("Reload Plex library") }
         OutlinedButton(onClick = vm::plexChangeServer, modifier = Modifier.fillMaxWidth()) { Text("Change server") }
         OutlinedButton(onClick = vm::plexSignOut, modifier = Modifier.fillMaxWidth()) { Text("Sign out of Plex") }
+
+        if (vm.plexMusicSections.isNotEmpty()) {
+            SectionHeading("Plex audiobook libraries")
+            Text(
+                "Turn on the Plex music libraries that hold audiobooks. " +
+                    "They show on the Audiobooks tab instead of Music. Each album becomes a book."
+            )
+            vm.plexMusicSections.forEach { section ->
+                val on = section.key in vm.plexBookKeys
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .toggleable(
+                            value = on,
+                            role = Role.Switch,
+                            enabled = !vm.plexLoading,
+                            onValueChange = { vm.toggleBookSection(section.key) }
+                        )
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("${section.title} is audiobooks", Modifier.weight(1f))
+                    Switch(checked = on, onCheckedChange = null, enabled = !vm.plexLoading)
+                }
+            }
+        }
     }
 }

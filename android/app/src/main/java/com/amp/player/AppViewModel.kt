@@ -134,8 +134,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var localVideos by mutableStateOf<List<LocalVideo>>(emptyList())
         private set
+    /** Audiobooks from this phone and from Plex, together. */
     var books by mutableStateOf<List<Book>>(emptyList())
         private set
+    private var localBooks: List<Book> = emptyList()
+    private var plexBooks: List<Book> = emptyList()
     var localLoading by mutableStateOf(false)
         private set
     var localLoaded by mutableStateOf(false)
@@ -174,6 +177,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var plexMovies by mutableStateOf<List<PlexItem>>(emptyList())
         private set
     var plexShows by mutableStateOf<List<PlexItem>>(emptyList())
+        private set
+    var plexBookCount by mutableIntStateOf(0)
+        private set
+    var plexMusicSections by mutableStateOf<List<PlexSection>>(emptyList())
+        private set
+    var plexBookKeys by mutableStateOf<Set<String>>(emptySet())
         private set
     var tvStack by mutableStateOf<List<PlexPage>>(emptyList())
         private set
@@ -293,7 +302,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun reportPlex(state: String) {
         val c = controller ?: return
         val key = currentPlexKey ?: return
-        if (currentKind != Kind.VIDEO) return
+        if (currentKind != Kind.VIDEO && currentKind != Kind.AUDIOBOOK) return
         val dur = c.duration
         if (dur == C.TIME_UNSET || dur <= 0) return
         val pos = c.currentPosition.coerceAtLeast(0)
@@ -406,7 +415,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             localSongs = songs
             localVideos = videos
-            books = bookList
+            localBooks = bookList
+            mergeBooks()
             localLoading = false
             localLoaded = true
         }
@@ -415,10 +425,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun reloadBooks() {
         viewModelScope.launch {
             val ctx = appContext
-            books = withContext(Dispatchers.IO) {
+            localBooks = withContext(Dispatchers.IO) {
                 LocalLibrary.loadBooks(ctx, store.addedBooks, hasMediaPermission)
             }
+            mergeBooks()
         }
+    }
+
+    private fun mergeBooks() {
+        books = (localBooks + plexBooks).sortedBy { it.title.lowercase() }
     }
 
     // ---------- Music ----------
@@ -560,7 +575,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- Audiobooks ----------
 
-    fun bookResume(b: Book): ResumePoint? = store.resume("book:${b.id}")
+    /** Where you left off. For Plex books with no saved place here, uses where Plex says you stopped. */
+    fun bookResume(b: Book): ResumePoint? {
+        store.resume("book:${b.id}")?.let { return it }
+        if (!b.fromPlex) return null
+        val i = b.parts.indexOfLast { it.viewOffsetMs > 0 }
+        if (i < 0) return null
+        val p = b.parts[i]
+        return ResumePoint("book:${b.id}", b.title, i, p.viewOffsetMs, p.durationMs, 0L)
+    }
 
     fun bookmarks(bookId: String): List<Bookmark> = store.bookmarks(bookId)
 
@@ -578,6 +601,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 artist = b.author,
                 album = b.title,
                 kind = Kind.AUDIOBOOK,
+                plexKey = p.plexKey,
                 bookId = b.id,
                 part = i
             )
@@ -798,13 +822,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             plexLoading = true
             try {
                 val sections = plex.librarySections()
-                val songs = plex.allTracks(sections).filter { it.isPlayable }.map { it.toSong() }
+                val music = sections.filter { it.type == "artist" }
+                val bookKeys = store.plexBookSections
+                    ?: music.filter { it.title.contains("book", ignoreCase = true) }.map { it.key }.toSet()
+                plexMusicSections = music
+                plexBookKeys = bookKeys
+                val songs = plex.allTracks(music.filter { it.key !in bookKeys }).filter { it.isPlayable }.map { it.toSong() }
+                val bookTracks = plex.allTracks(music.filter { it.key in bookKeys }).filter { it.isPlayable }
                 val movies = plex.movies(sections)
                 val shows = plex.shows(sections)
                 plexSongs = songs
                 plexMovies = movies
                 plexShows = shows
-                announce("Plex library loaded. ${songs.size} songs, ${movies.size} movies, ${shows.size} TV shows.")
+                plexBooks = groupPlexBooks(bookTracks)
+                plexBookCount = plexBooks.size
+                mergeBooks()
+                announce(
+                    "Plex library loaded. ${songs.size} songs, ${plexBooks.size} audiobooks, " +
+                        "${movies.size} movies, ${shows.size} TV shows."
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -813,6 +849,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 plexLoading = false
             }
         }
+    }
+
+    /** Each Plex album in an audiobook library becomes one book; its tracks are the chapters. */
+    private fun groupPlexBooks(tracks: List<PlexItem>): List<Book> =
+        tracks.groupBy { it.parentKey.ifBlank { it.ratingKey } }
+            .map { (key, list) ->
+                val sorted = list.sortedWith(compareBy<PlexItem>({ it.parentIndex }, { it.index }, { it.title.lowercase() }))
+                val first = sorted.first()
+                Book(
+                    id = "plex:$key",
+                    title = first.album.ifBlank { first.title },
+                    author = first.albumArtist.ifBlank { first.artist }.ifBlank { "Unknown author" },
+                    parts = sorted.map {
+                        BookPart(plex.streamUri(it), it.title, it.durationMs, plexKey = it.ratingKey, viewOffsetMs = it.viewOffsetMs)
+                    },
+                    added = false,
+                    fromPlex = true
+                )
+            }
+
+    /** Turns a Plex music library into an audiobook library, or back. */
+    fun toggleBookSection(key: String) {
+        val updated = if (key in plexBookKeys) plexBookKeys - key else plexBookKeys + key
+        store.plexBookSections = updated
+        plexBookKeys = updated
+        announce("Reloading your Plex library.")
+        loadPlexLibrary()
     }
 
     fun plexChangeServer() {
@@ -838,6 +901,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         plexSongs = emptyList()
         plexMovies = emptyList()
         plexShows = emptyList()
+        plexBooks = emptyList()
+        plexBookCount = 0
+        plexMusicSections = emptyList()
+        mergeBooks()
         tvStack = emptyList()
         continueWatching = continueWatching.filter { it.local != null }
     }
