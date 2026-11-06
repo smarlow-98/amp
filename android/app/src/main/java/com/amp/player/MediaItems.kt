@@ -9,6 +9,7 @@ import java.util.Locale
 const val EXTRA_KIND = "amp.kind"
 const val EXTRA_LOCAL_MP3 = "amp.localMp3"
 const val EXTRA_PLEX_KEY = "amp.plexKey"
+const val EXTRA_PLEX_SERVER = "amp.plexServer"
 const val EXTRA_BOOK_ID = "amp.bookId"
 const val EXTRA_PART = "amp.part"
 const val EXTRA_RESUME_ID = "amp.resumeId"
@@ -29,6 +30,7 @@ fun buildMediaItem(
     kind: String,
     localMp3: Uri? = null,
     plexKey: String? = null,
+    plexServer: String? = null,
     bookId: String? = null,
     part: Int = 0,
     resumeId: String? = null
@@ -38,6 +40,7 @@ fun buildMediaItem(
         putInt(EXTRA_PART, part)
         if (localMp3 != null) putString(EXTRA_LOCAL_MP3, localMp3.toString())
         if (plexKey != null) putString(EXTRA_PLEX_KEY, plexKey)
+        if (plexServer != null) putString(EXTRA_PLEX_SERVER, plexServer)
         if (bookId != null) putString(EXTRA_BOOK_ID, bookId)
         if (resumeId != null) putString(EXTRA_RESUME_ID, resumeId)
     }

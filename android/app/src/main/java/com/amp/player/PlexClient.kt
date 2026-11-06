@@ -15,16 +15,22 @@ import java.util.UUID
 
 data class PlexConnection(val uri: String, val local: Boolean, val relay: Boolean)
 
+/** A Plex server on your account. */
 data class PlexServer(
+    val id: String,
     val name: String,
     val accessToken: String,
     val owned: Boolean,
     val connections: List<PlexConnection>
 )
 
-data class PlexSection(val key: String, val title: String, val type: String)
+/** A server AMP is using, with the address that worked. */
+data class ConnectedServer(val id: String, val name: String, val base: String, val token: String)
+
+data class PlexSection(val server: String, val key: String, val title: String, val type: String)
 
 data class PlexItem(
+    val server: String,
     val title: String,
     val type: String,
     val subtitle: String,
@@ -33,7 +39,6 @@ data class PlexItem(
     val partKey: String?,
     val durationMs: Long,
     val ratingKey: String,
-    val parentKey: String = "",
     val album: String = "",
     val albumArtist: String = "",
     val index: Int = 0,
@@ -45,6 +50,8 @@ data class PlexItem(
 ) {
     val isPlayable: Boolean get() = partKey != null
     val isVideo: Boolean get() = type == "movie" || type == "episode" || type == "clip"
+    /** Unique across all your servers. */
+    val uid: String get() = "$server:$ratingKey"
 }
 
 data class PlexPin(val id: Long, val code: String)
@@ -59,8 +66,9 @@ fun plexWatchStatus(item: PlexItem): String = when {
 }
 
 /**
- * Talks to plex.tv and Plex Media Server. Any Plex user can sign in with their
- * own account; the app never sees their password, only a token.
+ * Talks to plex.tv and your Plex Media Servers. Any Plex user can sign in with
+ * their own account; the app never sees their password, only a token.
+ * Several servers can be connected at once, for example one for music and one for video.
  */
 class PlexClient(context: Context) {
 
@@ -75,11 +83,28 @@ class PlexClient(context: Context) {
             prefs.edit().putString(KEY_TOKEN, value).apply()
         }
 
-    private var serverBase: String? = prefs.getString(KEY_BASE, null)
-    private var serverToken: String? = prefs.getString(KEY_SERVER_TOKEN, null)
+    var connected: List<ConnectedServer> = loadConnected()
+        private set
 
-    val savedServerName: String get() = prefs.getString(KEY_SERVER_NAME, "") ?: ""
-    val hasSavedServer: Boolean get() = serverBase != null && serverToken != null
+    private fun loadConnected(): List<ConnectedServer> = runCatching {
+        val arr = JSONArray(prefs.getString(KEY_SERVERS, null) ?: "[]")
+        (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            ConnectedServer(o.str("id"), o.str("name"), o.str("base"), o.str("token"))
+        }
+    }.getOrDefault(emptyList())
+
+    private fun saveConnected(list: List<ConnectedServer>) {
+        connected = list
+        val arr = JSONArray()
+        list.forEach {
+            arr.put(JSONObject().put("id", it.id).put("name", it.name).put("base", it.base).put("token", it.token))
+        }
+        prefs.edit().putString(KEY_SERVERS, arr.toString()).apply()
+    }
+
+    private fun server(id: String): ConnectedServer =
+        connected.find { it.id == id } ?: throw IOException("That Plex server is not connected.")
 
     // ---------- Sign in ----------
 
@@ -101,17 +126,12 @@ class PlexClient(context: Context) {
 
     fun signOut() {
         prefs.edit().remove(KEY_TOKEN).apply()
-        forgetServer()
-    }
-
-    fun forgetServer() {
-        prefs.edit().remove(KEY_BASE).remove(KEY_SERVER_TOKEN).remove(KEY_SERVER_NAME).apply()
-        serverBase = null
-        serverToken = null
+        saveConnected(emptyList())
     }
 
     // ---------- Servers ----------
 
+    /** Every server on your account, including ones shared with you. */
     suspend fun servers(): List<PlexServer> = withContext(Dispatchers.IO) {
         val token = accountToken ?: throw IOException("You are not signed in to Plex.")
         val arr = JSONArray(
@@ -122,6 +142,7 @@ class PlexClient(context: Context) {
             if (!o.str("provides").contains("server")) return@mapNotNull null
             val conns = o.optJSONArray("connections") ?: JSONArray()
             PlexServer(
+                id = o.str("clientIdentifier").ifBlank { o.str("name") },
                 name = o.str("name").ifBlank { "Plex server" },
                 accessToken = o.str("accessToken").ifBlank { token },
                 owned = o.optBoolean("owned", false),
@@ -133,7 +154,7 @@ class PlexClient(context: Context) {
         }
     }
 
-    /** Tries local addresses first, then remote, then Plex relay. */
+    /** Finds an address that works (local first, then remote, then relay) and adds the server. */
     suspend fun connect(server: PlexServer) {
         withContext(Dispatchers.IO) {
             val ordered = server.connections.sortedBy { c ->
@@ -147,33 +168,32 @@ class PlexClient(context: Context) {
             for (c in ordered) {
                 try {
                     http("${c.uri}/identity", token = server.accessToken, timeoutMs = 5_000)
-                    serverBase = c.uri
-                    serverToken = server.accessToken
-                    prefs.edit()
-                        .putString(KEY_BASE, c.uri)
-                        .putString(KEY_SERVER_TOKEN, server.accessToken)
-                        .putString(KEY_SERVER_NAME, server.name)
-                        .apply()
+                    val entry = ConnectedServer(server.id, server.name, c.uri, server.accessToken)
+                    saveConnected(connected.filter { it.id != server.id } + entry)
                     return@withContext
                 } catch (e: Exception) {
                     lastError = e
                 }
             }
-            throw IOException("Could not reach ${server.name}. Make sure the server is turned on.", lastError)
+            throw IOException("Could not reach ${server.name}. Make sure that computer is on.", lastError)
         }
+    }
+
+    fun disconnect(id: String) {
+        saveConnected(connected.filter { it.id != id })
     }
 
     // ---------- Libraries ----------
 
-    suspend fun librarySections(): List<PlexSection> = withContext(Dispatchers.IO) {
-        val dirs = serverJson("/library/sections").optJSONArray("Directory") ?: JSONArray()
+    suspend fun librarySections(serverId: String): List<PlexSection> = withContext(Dispatchers.IO) {
+        val dirs = serverJson(serverId, "/library/sections").optJSONArray("Directory") ?: JSONArray()
         (0 until dirs.length()).map { i ->
             val d = dirs.getJSONObject(i)
-            PlexSection(d.str("key"), d.str("title"), d.str("type"))
+            PlexSection(serverId, d.str("key"), d.str("title"), d.str("type"))
         }
     }
 
-    /** Every song in every Plex music library, loaded in pages. */
+    /** Every song in the given music libraries, loaded in pages. */
     suspend fun allTracks(sections: List<PlexSection>): List<PlexItem> = withContext(Dispatchers.IO) {
         val out = mutableListOf<PlexItem>()
         for (s in sections.filter { it.type == "artist" }) {
@@ -181,8 +201,8 @@ class PlexClient(context: Context) {
             while (true) {
                 val path = "/library/sections/${s.key}/all?type=10" +
                     "&X-Plex-Container-Start=$start&X-Plex-Container-Size=$PAGE"
-                val arr = serverJson(path).optJSONArray("Metadata") ?: JSONArray()
-                for (i in 0 until arr.length()) out += parseItem(arr.getJSONObject(i), path)
+                val arr = serverJson(s.server, path).optJSONArray("Metadata") ?: JSONArray()
+                for (i in 0 until arr.length()) out += parseItem(arr.getJSONObject(i), path, s.server)
                 if (arr.length() < PAGE) break
                 start += PAGE
             }
@@ -200,73 +220,69 @@ class PlexClient(context: Context) {
         val out = mutableListOf<PlexItem>()
         for (s in sections) {
             val path = "/library/sections/${s.key}/all"
-            val arr = serverJson(path).optJSONArray("Metadata") ?: JSONArray()
-            for (i in 0 until arr.length()) out += parseItem(arr.getJSONObject(i), path)
+            val arr = serverJson(s.server, path).optJSONArray("Metadata") ?: JSONArray()
+            for (i in 0 until arr.length()) out += parseItem(arr.getJSONObject(i), path, s.server)
         }
-        out.sortedBy { it.title.lowercase() }
+        out
     }
 
     /** Movies and episodes you're partway through, plus the next episode of shows you're watching. */
-    suspend fun onDeck(): List<PlexItem> = withContext(Dispatchers.IO) {
+    suspend fun onDeck(serverId: String): List<PlexItem> = withContext(Dispatchers.IO) {
         val path = "/library/onDeck"
-        val arr = serverJson(path).optJSONArray("Metadata") ?: JSONArray()
-        (0 until arr.length()).map { i -> parseItem(arr.getJSONObject(i), path) }
+        val arr = serverJson(serverId, path).optJSONArray("Metadata") ?: JSONArray()
+        (0 until arr.length()).map { i -> parseItem(arr.getJSONObject(i), path, serverId) }
     }
 
-    suspend fun browse(path: String): List<PlexItem> = withContext(Dispatchers.IO) {
-        val c = serverJson(path)
+    suspend fun browse(serverId: String, path: String): List<PlexItem> = withContext(Dispatchers.IO) {
+        val c = serverJson(serverId, path)
         val arr = c.optJSONArray("Metadata") ?: c.optJSONArray("Directory") ?: JSONArray()
-        (0 until arr.length()).map { i -> parseItem(arr.getJSONObject(i), path) }
+        (0 until arr.length()).map { i -> parseItem(arr.getJSONObject(i), path, serverId) }
     }
 
     /** Tells Plex how far you've watched, so other Plex apps can resume too. */
-    suspend fun reportTimeline(ratingKey: String, state: String, timeMs: Long, durationMs: Long) {
+    suspend fun reportTimeline(serverId: String, ratingKey: String, state: String, timeMs: Long, durationMs: Long) {
         withContext(Dispatchers.IO) {
-            val base = serverBase ?: return@withContext
-            val token = serverToken ?: return@withContext
+            val s = connected.find { it.id == serverId } ?: return@withContext
             val ok = runCatching {
                 http(
-                    "$base/:/timeline?ratingKey=$ratingKey&key=%2Flibrary%2Fmetadata%2F$ratingKey" +
+                    "${s.base}/:/timeline?ratingKey=$ratingKey&key=%2Flibrary%2Fmetadata%2F$ratingKey" +
                         "&state=$state&time=$timeMs&duration=$durationMs",
-                    token = token, timeoutMs = 5_000
+                    token = s.token, timeoutMs = 5_000
                 )
             }.isSuccess
             if (!ok) {
                 runCatching {
                     http(
-                        "$base/:/progress?key=$ratingKey&identifier=com.plexapp.plugins.library" +
+                        "${s.base}/:/progress?key=$ratingKey&identifier=com.plexapp.plugins.library" +
                             "&time=$timeMs&state=$state",
-                        token = token, timeoutMs = 5_000
+                        token = s.token, timeoutMs = 5_000
                     )
                 }
             }
         }
     }
 
-    /** The address the player streams this item from. */
-    fun streamUri(item: PlexItem): Uri {
+    fun toMediaItem(item: PlexItem, kind: String): MediaItem {
+        val s = connected.find { it.id == item.server }
         val partKey = item.partKey ?: ""
         val sep = if (partKey.contains('?')) "&" else "?"
-        return Uri.parse(
-            (serverBase ?: "") + partKey + sep + "X-Plex-Token=" + Uri.encode(serverToken ?: "")
+        val uri = Uri.parse(
+            (s?.base ?: "") + partKey + sep + "X-Plex-Token=" + Uri.encode(s?.token ?: "")
         )
-    }
-
-    fun toMediaItem(item: PlexItem, kind: String): MediaItem {
-        val uri = streamUri(item)
         val artist = if (kind == Kind.VIDEO) item.subtitle else item.artist
         return buildMediaItem(
-            id = "plex:${item.ratingKey}",
+            id = "plex:${item.uid}",
             uri = uri,
             title = item.title,
             artist = artist.ifBlank { null },
             album = item.album.ifBlank { null },
             kind = kind,
-            plexKey = item.ratingKey
+            plexKey = item.ratingKey,
+            plexServer = item.server
         )
     }
 
-    private fun parseItem(m: JSONObject, parentPath: String): PlexItem {
+    private fun parseItem(m: JSONObject, parentPath: String, serverId: String): PlexItem {
         val type = m.str("type")
         val part = m.optJSONArray("Media")?.optJSONObject(0)
             ?.optJSONArray("Part")?.optJSONObject(0)
@@ -299,6 +315,7 @@ class PlexClient(context: Context) {
             else -> ""
         }
         return PlexItem(
+            server = serverId,
             title = m.str("title").ifBlank { "Untitled" },
             type = type,
             subtitle = subtitle,
@@ -307,7 +324,6 @@ class PlexClient(context: Context) {
             partKey = partKey,
             durationMs = m.optLong("duration", 0L),
             ratingKey = m.str("ratingKey"),
-            parentKey = m.str("parentRatingKey"),
             album = if (type == "track") m.str("parentTitle") else "",
             albumArtist = if (type == "track") m.str("grandparentTitle") else "",
             index = m.optInt("index", 0),
@@ -319,10 +335,9 @@ class PlexClient(context: Context) {
         )
     }
 
-    private fun serverJson(path: String): JSONObject {
-        val base = serverBase ?: throw IOException("No Plex server is selected.")
-        val token = serverToken ?: throw IOException("No Plex server is selected.")
-        val body = http(base + path, token = token, timeoutMs = 30_000)
+    private fun serverJson(serverId: String, path: String): JSONObject {
+        val s = server(serverId)
+        val body = http(s.base + path, token = s.token, timeoutMs = 30_000)
         return JSONObject(body).optJSONObject("MediaContainer") ?: JSONObject()
     }
 
@@ -339,7 +354,7 @@ class PlexClient(context: Context) {
             conn.readTimeout = timeoutMs
             conn.setRequestProperty("Accept", "application/json")
             conn.setRequestProperty("X-Plex-Product", "AMP")
-            conn.setRequestProperty("X-Plex-Version", "0.2.0")
+            conn.setRequestProperty("X-Plex-Version", "0.3.0")
             conn.setRequestProperty("X-Plex-Client-Identifier", clientId)
             conn.setRequestProperty("X-Plex-Platform", "Android")
             conn.setRequestProperty("X-Plex-Device-Name", "AMP on ${Build.MODEL}")
@@ -363,8 +378,6 @@ class PlexClient(context: Context) {
         const val PAGE = 1000
         const val KEY_CLIENT = "clientId"
         const val KEY_TOKEN = "accountToken"
-        const val KEY_BASE = "serverBase"
-        const val KEY_SERVER_TOKEN = "serverToken"
-        const val KEY_SERVER_NAME = "serverName"
+        const val KEY_SERVERS = "connectedServers"
     }
 }

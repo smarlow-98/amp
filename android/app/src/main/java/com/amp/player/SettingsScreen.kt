@@ -5,59 +5,47 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Switch
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.semantics.Role
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
 @Composable
 fun SettingsScreen(vm: AppViewModel) {
-    Column(Modifier.fillMaxSize()) {
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 16.dp)
+    ) {
         ScreenHeading("Settings")
         SectionHeading("Plex")
-        when {
-            !vm.plexSignedIn -> PlexSignIn(vm)
-            !vm.plexConnected -> PlexServerList(vm)
-            else -> PlexConnected(vm)
-        }
+        if (!vm.plexSignedIn) PlexSignIn(vm) else PlexServers(vm)
     }
 }
 
 @Composable
 private fun PlexSignIn(vm: AppViewModel) {
     val context = LocalContext.current
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (vm.plexWaitingForBrowser) {
             Text(
                 "Finish signing in to Plex in your browser, then come back to AMP. " +
-                    "This screen updates by itself.",
-                Modifier.padding(horizontal = 16.dp)
+                    "This screen updates by itself."
             )
-            OutlinedButton(onClick = vm::cancelPlexSignIn, modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text("Cancel sign in")
-            }
+            OutlinedButton(onClick = vm::cancelPlexSignIn) { Text("Cancel sign in") }
         } else {
-            Text(
-                "Sign in with your own Plex account to play music, movies and TV from your Plex servers.",
-                Modifier.padding(horizontal = 16.dp)
-            )
+            Text("Sign in with your own Plex account to play music, movies and TV from your Plex servers.")
             Button(
                 onClick = {
                     vm.startPlexSignIn { url ->
@@ -67,85 +55,61 @@ private fun PlexSignIn(vm: AppViewModel) {
                             vm.announce("No web browser was found to sign in with.")
                         }
                     }
-                },
-                modifier = Modifier.padding(horizontal = 16.dp)
+                }
             ) { Text("Sign in to Plex") }
         }
     }
 }
 
 @Composable
-private fun ColumnScope.PlexServerList(vm: AppViewModel) {
-    Text("Choose a Plex server.", Modifier.padding(horizontal = 16.dp))
-    if (vm.plexBusy) Text("Loading.", Modifier.padding(horizontal = 16.dp))
-
-    LazyColumn(Modifier.weight(1f)) {
-        itemsIndexed(vm.plexServers) { _, server ->
-            val owner = if (server.owned) "your server" else "shared with you"
-            MediaRow(
-                spoken = "${server.name}, $owner",
-                primary = server.name,
-                secondary = owner,
-                clickLabel = "connect",
-                onClick = { vm.connectServer(server) }
-            )
-            HorizontalDivider()
-        }
-    }
-
-    Column(
-        Modifier.fillMaxWidth().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        OutlinedButton(onClick = vm::loadPlexServers, modifier = Modifier.fillMaxWidth()) { Text("Refresh server list") }
-        OutlinedButton(onClick = vm::plexSignOut, modifier = Modifier.fillMaxWidth()) { Text("Sign out of Plex") }
-    }
-}
-
-@Composable
-private fun PlexConnected(vm: AppViewModel) {
-    Column(
-        Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text("Connected to ${vm.plexServerName}.")
+private fun PlexServers(vm: AppViewModel) {
+    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val on = vm.connectedServers
+        Text(
+            when {
+                on.isEmpty() -> "No servers are on. Turn on a server below."
+                else -> "Using ${on.joinToString(" and ") { it.name }}."
+            }
+        )
         Text(
             if (vm.plexLoading) "Loading your Plex library."
-            else "${vm.plexSongs.size} songs, ${vm.plexBookCount} audiobooks, " +
-                "${vm.plexMovies.size} movies, ${vm.plexShows.size} TV shows."
+            else "${vm.plexSongs.size} songs, ${vm.plexMovies.size} movies, ${vm.plexShows.size} TV shows."
         )
-        Button(
-            onClick = vm::loadPlexLibrary,
-            enabled = !vm.plexLoading,
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("Reload Plex library") }
-        OutlinedButton(onClick = vm::plexChangeServer, modifier = Modifier.fillMaxWidth()) { Text("Change server") }
-        OutlinedButton(onClick = vm::plexSignOut, modifier = Modifier.fillMaxWidth()) { Text("Sign out of Plex") }
 
-        if (vm.plexMusicSections.isNotEmpty()) {
-            SectionHeading("Plex audiobook libraries")
-            Text(
-                "Turn on the Plex music libraries that hold audiobooks. " +
-                    "They show on the Audiobooks tab instead of Music. Each album becomes a book."
-            )
-            vm.plexMusicSections.forEach { section ->
-                val on = section.key in vm.plexBookKeys
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .toggleable(
-                            value = on,
-                            role = Role.Switch,
-                            enabled = !vm.plexLoading,
-                            onValueChange = { vm.toggleBookSection(section.key) }
-                        )
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("${section.title} is audiobooks", Modifier.weight(1f))
-                    Switch(checked = on, onCheckedChange = null, enabled = !vm.plexLoading)
-                }
+        SectionHeading("Servers")
+        Text(
+            "Turn on every server you want to use. Music and Videos combine the libraries " +
+                "from all servers that are on."
+        )
+        if (vm.plexBusy && vm.plexServers.isEmpty()) Text("Loading your servers.")
+        vm.plexServers.forEach { server ->
+            val isOn = vm.isServerOn(server)
+            val owner = if (server.owned) "your server" else "shared with you"
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .toggleable(
+                        value = isOn,
+                        role = Role.Switch,
+                        enabled = !vm.plexBusy,
+                        onValueChange = { vm.toggleServer(server) }
+                    )
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("${server.name}, $owner", Modifier.weight(1f))
+                Switch(checked = isOn, onCheckedChange = null, enabled = !vm.plexBusy)
             }
         }
+
+        Button(
+            onClick = vm::loadPlexLibrary,
+            enabled = !vm.plexLoading && on.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Reload Plex library") }
+        OutlinedButton(onClick = { vm.loadPlexServers() }, modifier = Modifier.fillMaxWidth()) {
+            Text("Refresh server list")
+        }
+        OutlinedButton(onClick = vm::plexSignOut, modifier = Modifier.fillMaxWidth()) { Text("Sign out of Plex") }
     }
 }

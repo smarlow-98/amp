@@ -39,6 +39,9 @@ data class TagEditSession(
 
 data class PlexPage(val title: String, val items: List<PlexItem>)
 
+/** A chapter of an audiobook: a separate file ([part]), or a marker inside one file. */
+data class BookChapter(val title: String, val part: Int, val startMs: Long)
+
 /** One row in Continue watching, from this phone or from Plex. */
 data class ContinueEntry(
     val key: String,
@@ -100,8 +103,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var currentBookId by mutableStateOf<String?>(null)
         private set
-    private var currentPart = 0
+    var currentPart by mutableIntStateOf(0)
+        private set
     private var currentPlexKey: String? = null
+    private var currentPlexServer: String? = null
     private var currentResumeId: String? = null
     private var wasPlaying = false
     private var lastState = Player.STATE_IDLE
@@ -134,11 +139,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var localVideos by mutableStateOf<List<LocalVideo>>(emptyList())
         private set
-    /** Audiobooks from this phone and from Plex, together. */
     var books by mutableStateOf<List<Book>>(emptyList())
         private set
-    private var localBooks: List<Book> = emptyList()
-    private var plexBooks: List<Book> = emptyList()
     var localLoading by mutableStateOf(false)
         private set
     var localLoaded by mutableStateOf(false)
@@ -164,9 +166,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var plexServers by mutableStateOf<List<PlexServer>>(emptyList())
         private set
-    var plexConnected by mutableStateOf(false)
+    /** The servers AMP is using right now. You can use several at once. */
+    var connectedServers by mutableStateOf(plex.connected)
         private set
-    var plexServerName by mutableStateOf("")
+    var plexConnected by mutableStateOf(plex.connected.isNotEmpty())
         private set
     var plexBusy by mutableStateOf(false)
         private set
@@ -177,12 +180,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var plexMovies by mutableStateOf<List<PlexItem>>(emptyList())
         private set
     var plexShows by mutableStateOf<List<PlexItem>>(emptyList())
-        private set
-    var plexBookCount by mutableIntStateOf(0)
-        private set
-    var plexMusicSections by mutableStateOf<List<PlexSection>>(emptyList())
-        private set
-    var plexBookKeys by mutableStateOf<Set<String>>(emptySet())
         private set
     var tvStack by mutableStateOf<List<PlexPage>>(emptyList())
         private set
@@ -252,6 +249,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         currentBookId = extras?.getString(EXTRA_BOOK_ID)
         currentPart = extras?.getInt(EXTRA_PART) ?: 0
         currentPlexKey = extras?.getString(EXTRA_PLEX_KEY)
+        currentPlexServer = extras?.getString(EXTRA_PLEX_SERVER)
         currentResumeId = extras?.getString(EXTRA_RESUME_ID)
 
         if (wasPlaying && !playingNow) {
@@ -302,11 +300,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun reportPlex(state: String) {
         val c = controller ?: return
         val key = currentPlexKey ?: return
-        if (currentKind != Kind.VIDEO && currentKind != Kind.AUDIOBOOK) return
+        val server = currentPlexServer ?: return
+        if (currentKind != Kind.VIDEO) return
         val dur = c.duration
         if (dur == C.TIME_UNSET || dur <= 0) return
         val pos = c.currentPosition.coerceAtLeast(0)
-        viewModelScope.launch { plex.reportTimeline(key, state, pos, dur) }
+        viewModelScope.launch { plex.reportTimeline(server, key, state, pos, dur) }
     }
 
     fun playQueue(items: List<MediaItem>, startIndex: Int, startPositionMs: Long = 0L, playbackSpeed: Float = 1f) {
@@ -415,8 +414,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             localSongs = songs
             localVideos = videos
-            localBooks = bookList
-            mergeBooks()
+            books = bookList
             localLoading = false
             localLoaded = true
         }
@@ -425,15 +423,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun reloadBooks() {
         viewModelScope.launch {
             val ctx = appContext
-            localBooks = withContext(Dispatchers.IO) {
+            books = withContext(Dispatchers.IO) {
                 LocalLibrary.loadBooks(ctx, store.addedBooks, hasMediaPermission)
             }
-            mergeBooks()
         }
-    }
-
-    private fun mergeBooks() {
-        books = (localBooks + plexBooks).sortedBy { it.title.lowercase() }
     }
 
     // ---------- Music ----------
@@ -500,9 +493,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             val remote = if (plexConnected) {
                 try {
-                    plex.onDeck().filter { it.isPlayable }.map {
+                    plex.connected.flatMap { s ->
+                        try {
+                            plex.onDeck(s.id)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                    }.filter { it.isPlayable }.map {
                         ContinueEntry(
-                            key = "plex:${it.ratingKey}", title = it.title,
+                            key = "plex:${it.uid}", title = it.title,
                             subtitle = it.subtitle.ifBlank { if (it.type == "movie") "Movie" else "Plex" },
                             positionMs = it.viewOffsetMs, durationMs = it.durationMs,
                             lastViewed = it.lastViewedAt, plex = it
@@ -530,7 +531,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             plexBusy = true
             try {
-                val items = plex.browse(path)
+                val items = plex.browse(show.server, path)
                 tvStack = listOf(PlexPage(show.title, items))
                 announce("${show.title}. ${items.size} items.")
             } catch (e: Exception) {
@@ -555,7 +556,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             plexBusy = true
             try {
-                val items = plex.browse(path)
+                val items = plex.browse(item.server, path)
                 tvStack = tvStack + PlexPage(item.title, items)
                 announce("${item.title}. ${items.size} items.")
             } catch (e: Exception) {
@@ -575,15 +576,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- Audiobooks ----------
 
-    /** Where you left off. For Plex books with no saved place here, uses where Plex says you stopped. */
-    fun bookResume(b: Book): ResumePoint? {
-        store.resume("book:${b.id}")?.let { return it }
-        if (!b.fromPlex) return null
-        val i = b.parts.indexOfLast { it.viewOffsetMs > 0 }
-        if (i < 0) return null
-        val p = b.parts[i]
-        return ResumePoint("book:${b.id}", b.title, i, p.viewOffsetMs, p.durationMs, 0L)
-    }
+    fun bookResume(b: Book): ResumePoint? = store.resume("book:${b.id}")
 
     fun bookmarks(bookId: String): List<Bookmark> = store.bookmarks(bookId)
 
@@ -601,7 +594,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 artist = b.author,
                 album = b.title,
                 kind = Kind.AUDIOBOOK,
-                plexKey = p.plexKey,
                 bookId = b.id,
                 part = i
             )
@@ -615,9 +607,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val bookId = currentBookId ?: return
         val pos = c.currentPosition.coerceAtLeast(0)
         val book = books.find { it.id == bookId }
-        val label = buildString {
-            if ((book?.parts?.size ?: 1) > 1) append("Chapter ${currentPart + 1}, ")
-            append(spokenTime(pos))
+        val chapters = book?.let { bookChapters(it) } ?: emptyList()
+        val chapter = chapters.getOrNull(chapterIndex(chapters, currentPart, pos))
+        val label = if (chapter != null) {
+            "${chapter.title}, ${spokenTime(pos - chapter.startMs)} in"
+        } else {
+            spokenTime(pos)
         }
         store.addBookmark(bookId, Bookmark(System.currentTimeMillis(), currentPart, pos, label))
         bookmarkVersion++
@@ -625,6 +620,88 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun playBookmark(b: Book, m: Bookmark) = playBookAt(b, m.index, m.positionMs)
+
+    // ---------- Chapters ----------
+
+    private val chapterCache = mutableMapOf<String, List<BookChapter>>()
+    private val chaptersLoading = mutableSetOf<String>()
+
+    /** Goes up when chapter lists finish loading, so screens can refresh. */
+    var chapterVersion by mutableIntStateOf(0)
+        private set
+
+    val currentBook: Book? get() = books.find { it.id == currentBookId }
+
+    /**
+     * The chapters of a book: its files if it has several, or the chapter
+     * markers inside a single .m4b file. Returns null while still reading the file.
+     */
+    fun bookChapters(b: Book): List<BookChapter>? {
+        chapterCache[b.id]?.let { return it }
+        if (b.parts.size > 1) {
+            val list = b.parts.mapIndexed { i, p -> BookChapter(p.title, i, 0L) }
+            chapterCache[b.id] = list
+            return list
+        }
+        if (chaptersLoading.add(b.id)) {
+            val uri = b.parts.first().uri
+            viewModelScope.launch {
+                val found = withContext(Dispatchers.IO) { Mp4Chapters.read(appContext, uri) }
+                chapterCache[b.id] = found.map { BookChapter(it.title, 0, it.startMs) }
+                chaptersLoading.remove(b.id)
+                chapterVersion++
+            }
+        }
+        return null
+    }
+
+    fun chapterIndex(chapters: List<BookChapter>, part: Int, positionMs: Long): Int =
+        chapters.indexOfLast { it.part < part || (it.part == part && it.startMs <= positionMs) }
+
+    /** Next or previous chapter of the book that's playing. */
+    fun chapterJump(delta: Int) {
+        val c = controller ?: return
+        val b = currentBook ?: return
+        val chapters = bookChapters(b)
+        if (chapters == null) {
+            announce("Still reading the chapters. Try again in a moment.")
+            return
+        }
+        if (chapters.isEmpty()) {
+            announce("This book has no chapters.")
+            return
+        }
+        val part = c.currentMediaItemIndex
+        val pos = c.currentPosition.coerceAtLeast(0)
+        val idx = chapterIndex(chapters, part, pos)
+        var target = idx + delta
+        // Like a CD player: Previous goes to the start of this chapter first.
+        if (delta < 0 && idx >= 0) {
+            val cur = chapters[idx]
+            if (cur.part == part && pos - cur.startMs > 3_000) target = idx
+        }
+        if (target !in chapters.indices) {
+            announce(if (delta > 0) "This is the last chapter." else "This is the first chapter.")
+            if (delta < 0) c.seekTo(chapters.first().part, chapters.first().startMs)
+            return
+        }
+        val ch = chapters[target]
+        c.seekTo(ch.part, ch.startMs)
+        positionMs = ch.startMs
+        announce(ch.title)
+    }
+
+    /** Plays a book from a chapter, or jumps there if the book is already playing. */
+    fun playChapter(b: Book, ch: BookChapter) {
+        val c = controller
+        if (c != null && currentBookId == b.id && c.mediaItemCount == b.parts.size) {
+            c.seekTo(ch.part, ch.startMs)
+            if (!c.isPlaying) c.play()
+            announce(ch.title)
+        } else {
+            playBookAt(b, ch.part, ch.startMs)
+        }
+    }
 
     fun deleteBookmark(b: Book, m: Bookmark) {
         store.deleteBookmark(b.id, m.id)
@@ -746,7 +823,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         plexSignedIn = true
                         plexWaitingForBrowser = false
                         announce("Signed in to Plex.")
-                        loadPlexServers()
+                        loadPlexServers(autoConnect = true)
                         return@launch
                     }
                 }
@@ -767,17 +844,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         announce("Sign in cancelled.")
     }
 
-    fun loadPlexServers() {
+    /** Loads the list of servers on your account. With [autoConnect], turns on your own servers if none are on yet. */
+    fun loadPlexServers(autoConnect: Boolean = false) {
         viewModelScope.launch {
             plexBusy = true
             try {
                 val list = plex.servers()
                 plexServers = list
-                when (list.size) {
-                    0 -> announce("No Plex servers were found on your account.")
-                    1 -> connectServer(list[0])
-                    else -> announce("${list.size} Plex servers found.")
+                if (list.isEmpty()) {
+                    announce("No Plex servers were found on your account.")
+                } else if (autoConnect && plex.connected.isEmpty()) {
+                    val pick = list.filter { it.owned }.ifEmpty { list }
+                    val names = mutableListOf<String>()
+                    for (server in pick) {
+                        try {
+                            plex.connect(server)
+                            names += server.name
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            announce(e.message ?: "Could not reach ${server.name}.")
+                        }
+                    }
+                    syncConnected()
+                    if (names.isNotEmpty()) {
+                        announce("Connected to ${names.joinToString(" and ")}. Loading your library.")
+                        loadPlexLibrary()
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 announce("Could not load your Plex servers. ${e.message ?: ""}")
             } finally {
@@ -786,16 +882,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun connectServer(server: PlexServer) {
+    private fun syncConnected() {
+        connectedServers = plex.connected
+        plexConnected = plex.connected.isNotEmpty()
+    }
+
+    fun isServerOn(server: PlexServer): Boolean = connectedServers.any { it.id == server.id }
+
+    /** Turns one server on or off. Music and Videos show everything from every server that's on. */
+    fun toggleServer(server: PlexServer) {
+        if (isServerOn(server)) {
+            plex.disconnect(server.id)
+            syncConnected()
+            announce("${server.name} turned off.")
+            loadPlexLibrary()
+            return
+        }
         viewModelScope.launch {
             plexBusy = true
             announce("Connecting to ${server.name}.")
             try {
                 plex.connect(server)
-                plexConnected = true
-                plexServerName = server.name
-                announce("Connected to ${server.name}. Loading your library.")
+                syncConnected()
+                announce("Connected to ${server.name}. Loading its library.")
                 loadPlexLibrary()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 announce(e.message ?: "Could not connect to ${server.name}.")
             } finally {
@@ -805,84 +917,80 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun restorePlex() {
-        if (!plex.hasSavedServer) {
+        if (plex.connected.isEmpty()) {
+            loadPlexServers(autoConnect = true)
+        } else {
+            loadPlexLibrary()
             loadPlexServers()
-            return
         }
-        plexConnected = true
-        plexServerName = plex.savedServerName.ifBlank { "Plex" }
-        loadPlexLibrary()
     }
 
-    /** Loads every song, movie and TV show from the Plex server. */
+    private class ServerLibrary(val songs: List<Song>, val movies: List<PlexItem>, val shows: List<PlexItem>)
+
+    private suspend fun loadServer(id: String): ServerLibrary {
+        val sections = plex.librarySections(id)
+        return ServerLibrary(
+            songs = plex.allTracks(sections).filter { it.isPlayable }.map { it.toSong() },
+            movies = plex.movies(sections),
+            shows = plex.shows(sections)
+        )
+    }
+
+    /** Loads every song, movie and TV show from every server that's on, and combines them. */
     fun loadPlexLibrary() {
-        if (!plexConnected) return
         libraryJob?.cancel()
+        if (plex.connected.isEmpty()) {
+            clearPlexLibrary()
+            return
+        }
         libraryJob = viewModelScope.launch {
             plexLoading = true
             try {
-                val sections = plex.librarySections()
-                val music = sections.filter { it.type == "artist" }
-                val bookKeys = store.plexBookSections
-                    ?: music.filter { it.title.contains("book", ignoreCase = true) }.map { it.key }.toSet()
-                plexMusicSections = music
-                plexBookKeys = bookKeys
-                val songs = plex.allTracks(music.filter { it.key !in bookKeys }).filter { it.isPlayable }.map { it.toSong() }
-                val bookTracks = plex.allTracks(music.filter { it.key in bookKeys }).filter { it.isPlayable }
-                val movies = plex.movies(sections)
-                val shows = plex.shows(sections)
+                val songs = mutableListOf<Song>()
+                val movies = mutableListOf<PlexItem>()
+                val shows = mutableListOf<PlexItem>()
+                val failed = mutableListOf<String>()
+                for (s in plex.connected) {
+                    val lib = try {
+                        loadServer(s.id)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // The server's address may have changed, for example when you're away
+                        // from home. Look it up again and try once more.
+                        try {
+                            val fresh = plex.servers().find { it.id == s.id }
+                            if (fresh != null) {
+                                plex.connect(fresh)
+                                loadServer(s.id)
+                            } else null
+                        } catch (e2: CancellationException) {
+                            throw e2
+                        } catch (e2: Exception) {
+                            null
+                        }
+                    }
+                    if (lib == null) {
+                        failed += s.name
+                    } else {
+                        songs += lib.songs
+                        movies += lib.movies
+                        shows += lib.shows
+                    }
+                }
+                syncConnected()
                 plexSongs = songs
-                plexMovies = movies
-                plexShows = shows
-                plexBooks = groupPlexBooks(bookTracks)
-                plexBookCount = plexBooks.size
-                mergeBooks()
+                plexMovies = movies.sortedBy { it.title.lowercase() }
+                plexShows = shows.sortedBy { it.title.lowercase() }
+                val summary = "${songs.size} songs, ${movies.size} movies, ${shows.size} TV shows"
                 announce(
-                    "Plex library loaded. ${songs.size} songs, ${plexBooks.size} audiobooks, " +
-                        "${movies.size} movies, ${shows.size} TV shows."
+                    if (failed.isEmpty()) "Plex library loaded. $summary."
+                    else "Plex library loaded. $summary. Could not reach ${failed.joinToString(" and ")}."
                 )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                announce("Could not load your Plex library. ${e.message ?: ""}")
             } finally {
                 plexLoading = false
             }
         }
-    }
-
-    /** Each Plex album in an audiobook library becomes one book; its tracks are the chapters. */
-    private fun groupPlexBooks(tracks: List<PlexItem>): List<Book> =
-        tracks.groupBy { it.parentKey.ifBlank { it.ratingKey } }
-            .map { (key, list) ->
-                val sorted = list.sortedWith(compareBy<PlexItem>({ it.parentIndex }, { it.index }, { it.title.lowercase() }))
-                val first = sorted.first()
-                Book(
-                    id = "plex:$key",
-                    title = first.album.ifBlank { first.title },
-                    author = first.albumArtist.ifBlank { first.artist }.ifBlank { "Unknown author" },
-                    parts = sorted.map {
-                        BookPart(plex.streamUri(it), it.title, it.durationMs, plexKey = it.ratingKey, viewOffsetMs = it.viewOffsetMs)
-                    },
-                    added = false,
-                    fromPlex = true
-                )
-            }
-
-    /** Turns a Plex music library into an audiobook library, or back. */
-    fun toggleBookSection(key: String) {
-        val updated = if (key in plexBookKeys) plexBookKeys - key else plexBookKeys + key
-        store.plexBookSections = updated
-        plexBookKeys = updated
-        announce("Reloading your Plex library.")
-        loadPlexLibrary()
-    }
-
-    fun plexChangeServer() {
-        libraryJob?.cancel()
-        plex.forgetServer()
-        clearPlexLibrary()
-        loadPlexServers()
     }
 
     fun plexSignOut() {
@@ -891,20 +999,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         plex.signOut()
         plexSignedIn = false
         plexServers = emptyList()
+        syncConnected()
         clearPlexLibrary()
         announce("Signed out of Plex.")
     }
 
     private fun clearPlexLibrary() {
-        plexConnected = false
-        plexServerName = ""
         plexSongs = emptyList()
         plexMovies = emptyList()
         plexShows = emptyList()
-        plexBooks = emptyList()
-        plexBookCount = 0
-        plexMusicSections = emptyList()
-        mergeBooks()
         tvStack = emptyList()
         continueWatching = continueWatching.filter { it.local != null }
     }

@@ -63,17 +63,25 @@ fun NowPlayingScreen(vm: AppViewModel) {
             )
             if (vm.artist.isNotBlank()) Text(vm.artist)
 
+            val isBook = vm.currentKind == Kind.AUDIOBOOK
+            if (isBook) ChapterLine(vm)
+
             PositionSlider(vm)
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = vm::previous, modifier = Modifier.weight(1f)) { Text("Previous") }
+                OutlinedButton(
+                    onClick = { if (isBook) vm.chapterJump(-1) else vm.previous() },
+                    modifier = Modifier.weight(1f)
+                ) { Text(if (isBook) "Previous chapter" else "Previous") }
                 Button(onClick = vm::playPause, modifier = Modifier.weight(1f)) {
                     Text(if (vm.isPlaying) "Pause" else "Play")
                 }
-                OutlinedButton(onClick = vm::next, modifier = Modifier.weight(1f)) { Text("Next") }
+                OutlinedButton(
+                    onClick = { if (isBook) vm.chapterJump(1) else vm.next() },
+                    modifier = Modifier.weight(1f)
+                ) { Text(if (isBook) "Next chapter" else "Next") }
             }
 
-            val isBook = vm.currentKind == Kind.AUDIOBOOK
             val skipSeconds = if (isBook) 30 else 10
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { vm.seekBy(-skipSeconds * 1000L) }, modifier = Modifier.weight(1f)) {
@@ -131,6 +139,17 @@ fun NowPlayingScreen(vm: AppViewModel) {
             }
         }
     }
+}
+
+/** "Chapter 3 of 12: The Storm", for the audiobook that's playing. */
+@Composable
+private fun ChapterLine(vm: AppViewModel) {
+    val book = vm.currentBook ?: return
+    val chapters = remember(vm.chapterVersion, book.id) { vm.bookChapters(book) }
+    if (chapters.isNullOrEmpty()) return
+    val idx = vm.chapterIndex(chapters, vm.currentPart, vm.positionMs)
+    val ch = chapters.getOrNull(idx) ?: return
+    Text("Chapter ${idx + 1} of ${chapters.size}: ${ch.title}")
 }
 
 @Composable

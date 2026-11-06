@@ -12,8 +12,8 @@ android {
         applicationId = "com.amp.player"
         minSdk = 30          // Android 11 and newer
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.3.0"
     }
 
     buildTypes {

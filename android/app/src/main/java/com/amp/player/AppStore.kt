@@ -77,14 +77,6 @@ class AppStore(context: Context) {
             prefs.edit().putStringSet("addedBooks", value).apply()
         }
 
-    /** Plex music libraries you chose to use for audiobooks. Null means "pick by name". */
-    var plexBookSections: Set<String>?
-        get() = if (prefs.contains("plexBookSections")) prefs.getStringSet("plexBookSections", null)?.toSet() else null
-        set(value) {
-            if (value == null) prefs.edit().remove("plexBookSections").apply()
-            else prefs.edit().putStringSet("plexBookSections", value).apply()
-        }
-
     var audiobookSpeed: Float
         get() = prefs.getFloat("bookSpeed", 1f)
         set(value) {

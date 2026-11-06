@@ -63,15 +63,11 @@ fun AudiobooksScreen(vm: AppViewModel) {
             modifier = Modifier.padding(horizontal = 16.dp)
         ) { Text("Add audiobook files") }
 
-        if (vm.plexLoading) {
-            Text("Loading audiobooks from Plex.", Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
-        }
         if (vm.books.isEmpty()) {
             Text(
                 if (vm.localLoading) "Loading."
                 else "No audiobooks found yet. AMP finds m4b files, files marked as audiobooks, " +
-                    "and anything in a folder named Audiobooks. You can also add files with the button above. " +
-                    "For Plex, name your audiobook library with the word book in it, or choose it on the Settings tab.",
+                    "and anything in a folder named Audiobooks. You can also add files with the button above.",
                 Modifier.padding(16.dp)
             )
         }
@@ -81,11 +77,10 @@ fun AudiobooksScreen(vm: AppViewModel) {
             itemsIndexed(vm.books, key = { _, b -> b.id }) { _, b ->
                 val r = remember(version, b.id) { vm.bookResume(b) }
                 val status = bookStatus(b, r)
-                val where = if (b.fromPlex) ", from Plex" else ""
                 MediaRow(
-                    spoken = "${b.title}, by ${b.author}, $status$where",
+                    spoken = "${b.title}, by ${b.author}, $status",
                     primary = b.title,
-                    secondary = "${b.author}  •  $status" + if (b.fromPlex) "  •  Plex" else "",
+                    secondary = "${b.author}  •  $status",
                     clickLabel = "open",
                     onClick = { openId = b.id },
                     longClickLabel = if (b.added) "remove from list" else null,
@@ -101,6 +96,7 @@ fun AudiobooksScreen(vm: AppViewModel) {
 private fun BookDetail(vm: AppViewModel, book: Book, onBack: () -> Unit) {
     val r = remember(vm.progressVersion, book.id) { vm.bookResume(book) }
     val marks = remember(vm.bookmarkVersion, book.id) { vm.bookmarks(book.id) }
+    val chapters = remember(vm.chapterVersion, book.id) { vm.bookChapters(book) }
 
     LazyColumn(Modifier.fillMaxSize()) {
         item(key = "top") {
@@ -141,15 +137,31 @@ private fun BookDetail(vm: AppViewModel, book: Book, onBack: () -> Unit) {
             )
             HorizontalDivider()
         }
-        if (book.parts.size > 1) {
-            item(key = "chapters") { SectionHeading("Chapters, ${book.parts.size}") }
-            itemsIndexed(book.parts, key = { i, _ -> "part:$i" }) { i, p ->
+        item(key = "chapters") {
+            Column {
+                SectionHeading(if (chapters.isNullOrEmpty()) "Chapters" else "Chapters, ${chapters.size}")
+                when {
+                    chapters == null -> Text("Reading chapters.", Modifier.padding(horizontal = 16.dp))
+                    chapters.isEmpty() -> Text(
+                        "This book has no chapter markers. You can still move around with bookmarks and the skip buttons.",
+                        Modifier.padding(horizontal = 16.dp)
+                    )
+                }
+            }
+        }
+        if (!chapters.isNullOrEmpty()) {
+            itemsIndexed(chapters, key = { i, _ -> "ch:$i" }) { i, ch ->
+                // How long this chapter is: up to the next chapter in the same file, or the end of the file.
+                val next = chapters.getOrNull(i + 1)
+                val partLength = book.parts.getOrNull(ch.part)?.durationMs ?: 0L
+                val end = if (next != null && next.part == ch.part) next.startMs else partLength
+                val length = (end - ch.startMs).coerceAtLeast(0)
                 MediaRow(
-                    spoken = "Chapter ${i + 1}, ${p.title}, ${spokenLength(p.durationMs)}",
-                    primary = p.title,
-                    secondary = "Chapter ${i + 1}  •  ${clockTime(p.durationMs)}",
+                    spoken = "Chapter ${i + 1}, ${ch.title}" + if (length > 0) ", ${spokenLength(length)}" else "",
+                    primary = ch.title,
+                    secondary = "Chapter ${i + 1}" + if (length > 0) "  •  ${clockTime(length)}" else "",
                     clickLabel = "play",
-                    onClick = { vm.playBookAt(book, i, 0L) }
+                    onClick = { vm.playChapter(book, ch) }
                 )
                 HorizontalDivider()
             }

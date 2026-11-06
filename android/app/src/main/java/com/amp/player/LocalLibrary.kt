@@ -30,13 +30,7 @@ data class ArtistGroup(val key: String, val name: String, val songs: List<Song>)
 
 data class LocalVideo(val uri: Uri, val title: String, val durationMs: Long)
 
-data class BookPart(
-    val uri: Uri,
-    val title: String,
-    val durationMs: Long,
-    val plexKey: String? = null,
-    val viewOffsetMs: Long = 0
-)
+data class BookPart(val uri: Uri, val title: String, val durationMs: Long)
 
 data class Book(
     val id: String,
@@ -44,8 +38,7 @@ data class Book(
     val author: String,
     val parts: List<BookPart>,
     /** True when you added the file yourself with "Add audiobook files". */
-    val added: Boolean,
-    val fromPlex: Boolean = false
+    val added: Boolean
 ) {
     val durationMs: Long get() = parts.sumOf { it.durationMs }
 }
@@ -79,7 +72,7 @@ fun groupArtists(songs: List<Song>): List<ArtistGroup> =
         .sortedBy { it.name.lowercase() }
 
 fun PlexItem.toSong() = Song(
-    id = "plex:$ratingKey",
+    id = "plex:$uid",
     title = title,
     artist = artist.ifBlank { "Unknown artist" },
     album = album,
