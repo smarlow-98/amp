@@ -47,13 +47,13 @@ fun NowPlayingScreen(vm: AppViewModel) {
 
         if (!vm.hasMedia) {
             Text(
-                "Nothing is playing. Choose something from your library or from Plex.",
+                "Nothing is playing. Choose something from Music, Videos or Audiobooks.",
                 Modifier.padding(horizontal = 16.dp)
             )
             return@Column
         }
 
-        if (vm.currentIsVideo) VideoSurface(vm.controller)
+        if (vm.currentKind == Kind.VIDEO) VideoSurface(vm.controller)
 
         Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
@@ -73,13 +73,25 @@ fun NowPlayingScreen(vm: AppViewModel) {
                 OutlinedButton(onClick = vm::next, modifier = Modifier.weight(1f)) { Text("Next") }
             }
 
+            val isBook = vm.currentKind == Kind.AUDIOBOOK
+            val skipSeconds = if (isBook) 30 else 10
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { vm.seekBy(-10_000) }, modifier = Modifier.weight(1f)) {
-                    Text("Back 10 seconds")
+                OutlinedButton(onClick = { vm.seekBy(-skipSeconds * 1000L) }, modifier = Modifier.weight(1f)) {
+                    Text("Back $skipSeconds seconds")
                 }
-                OutlinedButton(onClick = { vm.seekBy(10_000) }, modifier = Modifier.weight(1f)) {
-                    Text("Forward 10 seconds")
+                OutlinedButton(onClick = { vm.seekBy(skipSeconds * 1000L) }, modifier = Modifier.weight(1f)) {
+                    Text("Forward $skipSeconds seconds")
                 }
+            }
+
+            if (isBook) {
+                Button(onClick = vm::addBookmark, modifier = Modifier.fillMaxWidth()) {
+                    Text("Add bookmark")
+                }
+            }
+
+            OutlinedButton(onClick = vm::cycleSpeed, modifier = Modifier.fillMaxWidth()) {
+                Text("Speed: " + vm.speedLabel(vm.speed))
             }
 
             OutlinedButton(onClick = vm::announceTime, modifier = Modifier.fillMaxWidth()) {

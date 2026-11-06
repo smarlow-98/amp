@@ -6,8 +6,19 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import java.util.Locale
 
-const val EXTRA_IS_VIDEO = "amp.isVideo"
+const val EXTRA_KIND = "amp.kind"
 const val EXTRA_LOCAL_MP3 = "amp.localMp3"
+const val EXTRA_PLEX_KEY = "amp.plexKey"
+const val EXTRA_BOOK_ID = "amp.bookId"
+const val EXTRA_PART = "amp.part"
+const val EXTRA_RESUME_ID = "amp.resumeId"
+
+/** What kind of thing is playing. */
+object Kind {
+    const val MUSIC = "music"
+    const val VIDEO = "video"
+    const val AUDIOBOOK = "audiobook"
+}
 
 fun buildMediaItem(
     id: String,
@@ -15,12 +26,20 @@ fun buildMediaItem(
     title: String,
     artist: String?,
     album: String?,
-    isVideo: Boolean,
-    localMp3: Uri?
+    kind: String,
+    localMp3: Uri? = null,
+    plexKey: String? = null,
+    bookId: String? = null,
+    part: Int = 0,
+    resumeId: String? = null
 ): MediaItem {
     val extras = Bundle().apply {
-        putBoolean(EXTRA_IS_VIDEO, isVideo)
+        putString(EXTRA_KIND, kind)
+        putInt(EXTRA_PART, part)
         if (localMp3 != null) putString(EXTRA_LOCAL_MP3, localMp3.toString())
+        if (plexKey != null) putString(EXTRA_PLEX_KEY, plexKey)
+        if (bookId != null) putString(EXTRA_BOOK_ID, bookId)
+        if (resumeId != null) putString(EXTRA_RESUME_ID, resumeId)
     }
     return MediaItem.Builder()
         .setMediaId(id)
@@ -57,6 +76,18 @@ fun spokenTime(ms: Long): String {
     if (h > 0) parts += plural(h, "hour")
     if (m > 0) parts += plural(m, "minute")
     if (sec > 0 || parts.isEmpty()) parts += plural(sec, "second")
+    return parts.joinToString(" ")
+}
+
+/** Shorter spoken time without seconds, for lists. */
+fun spokenLength(ms: Long): String {
+    val totalMin = (ms / 60_000).coerceAtLeast(0)
+    if (totalMin == 0L) return spokenTime(ms)
+    val h = totalMin / 60
+    val m = totalMin % 60
+    val parts = mutableListOf<String>()
+    if (h > 0) parts += plural(h, "hour")
+    if (m > 0) parts += plural(m, "minute")
     return parts.joinToString(" ")
 }
 

@@ -2,9 +2,11 @@
 
 Screen-reader accessible media player for Android 11 and newer.
 
-- Plays local music and videos using Google's Media3 engine
+- Music: one library of songs, albums and artists from this phone and Plex, with a source filter
+- Videos: Continue watching, Plex movies and TV shows, and videos on this phone, with resume
+- Audiobooks: m4b and other audio books, chapters, resume, bookmarks and playback speed
 - View and edit ID3 tags on MP3 files (double tap and hold a song, or use Edit tags on Now playing)
-- Sign in with any Plex account and play music, movies and TV from your servers
+- Sign in with any Plex account on the Settings tab
 - Background playback with lock screen and notification controls
 - Built for TalkBack: real Android controls, headings, spoken durations
 

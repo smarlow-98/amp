@@ -8,9 +8,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -26,6 +28,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -41,6 +44,16 @@ fun AmpTheme(content: @Composable () -> Unit) {
         content = content
     )
 }
+
+private data class NavTab(val label: String, val icon: ImageVector)
+
+private val tabs = listOf(
+    NavTab("Music", Icons.Filled.Home),
+    NavTab("Videos", Icons.Filled.Star),
+    NavTab("Audiobooks", Icons.Filled.Favorite),
+    NavTab("Now playing", Icons.Filled.PlayArrow),
+    NavTab("Settings", Icons.Filled.Settings)
+)
 
 @Composable
 fun AmpApp(vm: AppViewModel = viewModel()) {
@@ -60,24 +73,14 @@ fun AmpApp(vm: AppViewModel = viewModel()) {
         bottomBar = {
             if (!editing) {
                 NavigationBar {
-                    NavigationBarItem(
-                        selected = tab == 0,
-                        onClick = { tab = 0 },
-                        icon = { Icon(Icons.Filled.Home, contentDescription = null) },
-                        label = { Text("Library") }
-                    )
-                    NavigationBarItem(
-                        selected = tab == 1,
-                        onClick = { tab = 1 },
-                        icon = { Icon(Icons.Filled.Person, contentDescription = null) },
-                        label = { Text("Plex") }
-                    )
-                    NavigationBarItem(
-                        selected = tab == 2,
-                        onClick = { tab = 2 },
-                        icon = { Icon(Icons.Filled.PlayArrow, contentDescription = null) },
-                        label = { Text("Now playing") }
-                    )
+                    tabs.forEachIndexed { i, t ->
+                        NavigationBarItem(
+                            selected = tab == i,
+                            onClick = { tab = i },
+                            icon = { Icon(t.icon, contentDescription = null) },
+                            label = { Text(t.label, maxLines = 1) }
+                        )
+                    }
                 }
             }
         }
@@ -85,9 +88,11 @@ fun AmpApp(vm: AppViewModel = viewModel()) {
         Column(Modifier.fillMaxSize().padding(padding)) {
             when {
                 editing -> TagEditorScreen(vm)
-                tab == 0 -> LibraryScreen(vm)
-                tab == 1 -> PlexScreen(vm)
-                else -> NowPlayingScreen(vm)
+                tab == 0 -> MusicScreen(vm)
+                tab == 1 -> VideosScreen(vm)
+                tab == 2 -> AudiobooksScreen(vm)
+                tab == 3 -> NowPlayingScreen(vm)
+                else -> SettingsScreen(vm)
             }
         }
     }
@@ -101,6 +106,18 @@ fun ScreenHeading(text: String) {
         style = MaterialTheme.typography.headlineSmall,
         modifier = Modifier
             .padding(horizontal = 16.dp, vertical = 12.dp)
+            .semantics { heading() }
+    )
+}
+
+/** A smaller heading inside a screen. */
+@Composable
+fun SectionHeading(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
             .semantics { heading() }
     )
 }

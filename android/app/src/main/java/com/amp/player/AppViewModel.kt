@@ -2,10 +2,12 @@ package com.amp.player
 
 import android.app.Application
 import android.content.ComponentName
+import android.content.Intent
 import android.content.IntentSender
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +21,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -36,9 +39,22 @@ data class TagEditSession(
 
 data class PlexPage(val title: String, val items: List<PlexItem>)
 
+/** One row in Continue watching, from this phone or from Plex. */
+data class ContinueEntry(
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val positionMs: Long,
+    val durationMs: Long,
+    val lastViewed: Long,
+    val local: LocalVideo? = null,
+    val plex: PlexItem? = null
+)
+
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val appContext: Application get() = getApplication()
+    private val store = AppStore(app)
 
     // ---------- Spoken announcements (read by TalkBack) ----------
 
@@ -76,9 +92,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var repeatMode by mutableIntStateOf(Player.REPEAT_MODE_OFF)
         private set
-    var currentIsVideo by mutableStateOf(false)
+    var speed by mutableFloatStateOf(1f)
+        private set
+    var currentKind by mutableStateOf(Kind.MUSIC)
         private set
     var currentLocalMp3 by mutableStateOf<Uri?>(null)
+        private set
+    var currentBookId by mutableStateOf<String?>(null)
+        private set
+    private var currentPart = 0
+    private var currentPlexKey: String? = null
+    private var currentResumeId: String? = null
+    private var wasPlaying = false
+    private var lastState = Player.STATE_IDLE
+
+    /** Goes up whenever resume points change, so lists can refresh. */
+    var progressVersion by mutableIntStateOf(0)
+        private set
+    var bookmarkVersion by mutableIntStateOf(0)
         private set
 
     private val playerListener = object : Player.Listener {
@@ -97,16 +128,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---------- Local library ----------
+    // ---------- Library on this phone ----------
 
-    var music by mutableStateOf<List<LocalTrack>>(emptyList())
+    var localSongs by mutableStateOf<List<Song>>(emptyList())
         private set
-    var videos by mutableStateOf<List<LocalTrack>>(emptyList())
+    var localVideos by mutableStateOf<List<LocalVideo>>(emptyList())
+        private set
+    var books by mutableStateOf<List<Book>>(emptyList())
         private set
     var localLoading by mutableStateOf(false)
         private set
     var localLoaded by mutableStateOf(false)
         private set
+    private var hasMediaPermission = false
 
     // ---------- Tag editor ----------
 
@@ -129,11 +163,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var plexConnected by mutableStateOf(false)
         private set
-    var plexStack by mutableStateOf<List<PlexPage>>(emptyList())
+    var plexServerName by mutableStateOf("")
         private set
     var plexBusy by mutableStateOf(false)
         private set
+    var plexLoading by mutableStateOf(false)
+        private set
+    var plexSongs by mutableStateOf<List<Song>>(emptyList())
+        private set
+    var plexMovies by mutableStateOf<List<PlexItem>>(emptyList())
+        private set
+    var plexShows by mutableStateOf<List<PlexItem>>(emptyList())
+        private set
+    var tvStack by mutableStateOf<List<PlexPage>>(emptyList())
+        private set
+    var continueWatching by mutableStateOf<List<ContinueEntry>>(emptyList())
+        private set
+    var continueLoading by mutableStateOf(false)
+        private set
     private var signInJob: Job? = null
+    private var libraryJob: Job? = null
 
     init {
         controllerFuture.addListener({
@@ -148,12 +197,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }, ContextCompat.getMainExecutor(app))
 
         // Update the position once a second. Kept slow on purpose so the
-        // screen stays smooth and TalkBack isn't flooded.
+        // screen stays smooth and TalkBack isn't flooded. Also saves your place.
         viewModelScope.launch {
+            var tick = 0
             while (isActive) {
                 delay(1000)
                 val c = controller
-                if (c != null && c.isPlaying) positionMs = c.currentPosition.coerceAtLeast(0)
+                if (c != null && c.isPlaying) {
+                    positionMs = c.currentPosition.coerceAtLeast(0)
+                    tick++
+                    if (tick % 5 == 0) saveProgress(bump = false)
+                    if (tick % 10 == 0) reportPlex("playing")
+                }
             }
         }
 
@@ -161,6 +216,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        saveProgress(bump = false)
         controller?.removeListener(playerListener)
         MediaController.releaseFuture(controllerFuture)
         super.onCleared()
@@ -168,8 +224,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun refresh() {
         val c = controller ?: return
+        val playingNow = c.isPlaying
         hasMedia = c.mediaItemCount > 0
-        isPlaying = c.isPlaying
+        isPlaying = playingNow
         val item = c.currentMediaItem
         title = c.mediaMetadata.title?.toString()
             ?: item?.mediaMetadata?.title?.toString()
@@ -179,18 +236,80 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         positionMs = c.currentPosition.coerceAtLeast(0)
         shuffleOn = c.shuffleModeEnabled
         repeatMode = c.repeatMode
+        speed = c.playbackParameters.speed
         val extras = item?.mediaMetadata?.extras
-        currentIsVideo = extras?.getBoolean(EXTRA_IS_VIDEO) == true
+        currentKind = extras?.getString(EXTRA_KIND) ?: Kind.MUSIC
         currentLocalMp3 = extras?.getString(EXTRA_LOCAL_MP3)?.let(Uri::parse)
+        currentBookId = extras?.getString(EXTRA_BOOK_ID)
+        currentPart = extras?.getInt(EXTRA_PART) ?: 0
+        currentPlexKey = extras?.getString(EXTRA_PLEX_KEY)
+        currentResumeId = extras?.getString(EXTRA_RESUME_ID)
+
+        if (wasPlaying && !playingNow) {
+            saveProgress(bump = true)
+            reportPlex("paused")
+        }
+        wasPlaying = playingNow
+
+        val state = c.playbackState
+        if (state == Player.STATE_ENDED && lastState != Player.STATE_ENDED) onEnded()
+        lastState = state
     }
 
-    fun playQueue(items: List<MediaItem>, startIndex: Int) {
+    private fun onEnded() {
+        val bookId = currentBookId
+        if (currentKind == Kind.AUDIOBOOK && bookId != null) {
+            store.clearResume("book:$bookId")
+            progressVersion++
+            announce("End of book.")
+        }
+        currentResumeId?.let { store.clearResume(it); progressVersion++ }
+        reportPlex("stopped")
+    }
+
+    /** Remembers where you are in a video or audiobook. */
+    private fun saveProgress(bump: Boolean) {
+        val c = controller ?: return
+        if (c.mediaItemCount == 0) return
+        val pos = c.currentPosition.coerceAtLeast(0)
+        val dur = c.duration.let { if (it == C.TIME_UNSET || it < 0) 0L else it }
+        val now = System.currentTimeMillis()
+        when (currentKind) {
+            Kind.VIDEO -> {
+                val id = currentResumeId ?: return
+                if (dur > 0 && pos > dur * 95 / 100) store.clearResume(id)
+                else if (pos > 15_000) store.saveResume(ResumePoint(id, title, 0, pos, dur, now))
+            }
+            Kind.AUDIOBOOK -> {
+                val bookId = currentBookId ?: return
+                val bookTitle = books.find { it.id == bookId }?.title ?: title
+                store.saveResume(ResumePoint("book:$bookId", bookTitle, currentPart, pos, dur, now))
+            }
+            else -> return
+        }
+        if (bump) progressVersion++
+    }
+
+    private fun reportPlex(state: String) {
+        val c = controller ?: return
+        val key = currentPlexKey ?: return
+        if (currentKind != Kind.VIDEO) return
+        val dur = c.duration
+        if (dur == C.TIME_UNSET || dur <= 0) return
+        val pos = c.currentPosition.coerceAtLeast(0)
+        viewModelScope.launch { plex.reportTimeline(key, state, pos, dur) }
+    }
+
+    fun playQueue(items: List<MediaItem>, startIndex: Int, startPositionMs: Long = 0L, playbackSpeed: Float = 1f) {
         val c = controller
         if (c == null) {
             announce("The player is still starting. Try again in a moment.")
             return
         }
-        c.setMediaItems(items, startIndex, 0L)
+        if (items.isEmpty()) return
+        saveProgress(bump = true)
+        c.setMediaItems(items, startIndex.coerceIn(0, items.lastIndex), startPositionMs.coerceAtLeast(0))
+        c.setPlaybackSpeed(playbackSpeed)
         c.prepare()
         c.play()
     }
@@ -243,6 +362,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    private val speeds = listOf(0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f)
+
+    fun cycleSpeed() {
+        val c = controller ?: return
+        val cur = c.playbackParameters.speed
+        val next = speeds.firstOrNull { it > cur + 0.01f } ?: speeds.first()
+        c.setPlaybackSpeed(next)
+        if (currentKind == Kind.AUDIOBOOK) store.audiobookSpeed = next
+        announce("Speed ${speedLabel(next)}")
+    }
+
+    fun speedLabel(f: Float): String {
+        val text = if (f == f.toInt().toFloat()) f.toInt().toString() else f.toString()
+        return "$text times"
+    }
+
     fun announceTime() {
         val c = controller ?: return
         val pos = c.currentPosition.coerceAtLeast(0)
@@ -253,23 +388,247 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    // ---------- Local library ----------
+    // ---------- Library on this phone ----------
 
-    fun loadLocal() {
+    fun loadLocal(permissionGranted: Boolean = hasMediaPermission) {
+        hasMediaPermission = permissionGranted
         viewModelScope.launch {
             localLoading = true
-            val (m, v) = withContext(Dispatchers.IO) {
-                LocalLibrary.loadAudio(appContext) to LocalLibrary.loadVideo(appContext)
+            val ctx = appContext
+            val songs = withContext(Dispatchers.IO) {
+                if (permissionGranted) runCatching { LocalLibrary.loadSongs(ctx) }.getOrDefault(emptyList()) else emptyList()
             }
-            music = m
-            videos = v
+            val videos = withContext(Dispatchers.IO) {
+                if (permissionGranted) runCatching { LocalLibrary.loadVideos(ctx) }.getOrDefault(emptyList()) else emptyList()
+            }
+            val bookList = withContext(Dispatchers.IO) {
+                LocalLibrary.loadBooks(ctx, store.addedBooks, permissionGranted)
+            }
+            localSongs = songs
+            localVideos = videos
+            books = bookList
             localLoading = false
             localLoaded = true
         }
     }
 
-    fun playLocal(list: List<LocalTrack>, index: Int) {
-        playQueue(list.map { it.toMediaItem() }, index)
+    private fun reloadBooks() {
+        viewModelScope.launch {
+            val ctx = appContext
+            books = withContext(Dispatchers.IO) {
+                LocalLibrary.loadBooks(ctx, store.addedBooks, hasMediaPermission)
+            }
+        }
+    }
+
+    // ---------- Music ----------
+
+    private fun songItem(s: Song): MediaItem = when (s.source) {
+        Source.PHONE -> buildMediaItem(
+            id = s.id,
+            uri = s.uri!!,
+            title = s.title,
+            artist = s.artist,
+            album = s.album.ifBlank { null },
+            kind = Kind.MUSIC,
+            localMp3 = if (s.isMp3) s.uri else null
+        )
+        Source.PLEX -> plex.toMediaItem(s.plex!!, Kind.MUSIC)
+    }
+
+    /** Plays a list of songs. Very long lists are trimmed to the 500 songs around your choice. */
+    fun playSongs(list: List<Song>, index: Int) {
+        if (list.isEmpty()) return
+        val i = index.coerceIn(0, list.lastIndex)
+        val from = (i - 200).coerceAtLeast(0)
+        val to = (i + 300).coerceAtMost(list.size)
+        controller?.shuffleModeEnabled = false
+        playQueue(list.subList(from, to).map(::songItem), i - from)
+    }
+
+    fun shuffleSongs(list: List<Song>) {
+        if (list.isEmpty()) return
+        val picked = list.shuffled().take(500)
+        playQueue(picked.map(::songItem), 0)
+        announce("Shuffling ${picked.size} songs.")
+    }
+
+    // ---------- Videos ----------
+
+    private fun videoResumeId(v: LocalVideo) = "video:${v.uri}"
+
+    fun localVideoResume(v: LocalVideo): ResumePoint? = store.resume(videoResumeId(v))
+
+    fun playLocalVideo(v: LocalVideo, fromStart: Boolean) {
+        val id = videoResumeId(v)
+        val start = if (fromStart) 0L else store.resume(id)?.positionMs ?: 0L
+        val item = buildMediaItem(id, v.uri, v.title, null, null, Kind.VIDEO, resumeId = id)
+        playQueue(listOf(item), 0, start)
+    }
+
+    fun playPlexVideo(item: PlexItem, fromStart: Boolean) {
+        val start = if (fromStart) 0L else item.viewOffsetMs
+        playQueue(listOf(plex.toMediaItem(item, Kind.VIDEO)), 0, start)
+    }
+
+    fun refreshContinueWatching() {
+        viewModelScope.launch {
+            continueLoading = true
+            val locals = localVideos.mapNotNull { v ->
+                store.resume(videoResumeId(v))?.let { r ->
+                    ContinueEntry(
+                        key = videoResumeId(v), title = v.title, subtitle = "On this phone",
+                        positionMs = r.positionMs, durationMs = r.durationMs.takeIf { it > 0 } ?: v.durationMs,
+                        lastViewed = r.updatedAt, local = v
+                    )
+                }
+            }
+            val remote = if (plexConnected) {
+                try {
+                    plex.onDeck().filter { it.isPlayable }.map {
+                        ContinueEntry(
+                            key = "plex:${it.ratingKey}", title = it.title,
+                            subtitle = it.subtitle.ifBlank { if (it.type == "movie") "Movie" else "Plex" },
+                            positionMs = it.viewOffsetMs, durationMs = it.durationMs,
+                            lastViewed = it.lastViewedAt, plex = it
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    announce("Could not load Continue watching from Plex. ${e.message ?: ""}")
+                    emptyList()
+                }
+            } else emptyList()
+            continueWatching = (locals + remote).distinctBy { it.key }.sortedByDescending { it.lastViewed }
+            continueLoading = false
+        }
+    }
+
+    fun playContinue(e: ContinueEntry, fromStart: Boolean) {
+        e.local?.let { playLocalVideo(it, fromStart); return }
+        e.plex?.let { playPlexVideo(it, fromStart) }
+    }
+
+    fun openShow(show: PlexItem) {
+        val path = show.browsePath ?: return
+        viewModelScope.launch {
+            plexBusy = true
+            try {
+                val items = plex.browse(path)
+                tvStack = listOf(PlexPage(show.title, items))
+                announce("${show.title}. ${items.size} items.")
+            } catch (e: Exception) {
+                announce("Could not open ${show.title}. ${e.message ?: ""}")
+            } finally {
+                plexBusy = false
+            }
+        }
+    }
+
+    fun openTvItem(index: Int, fromStart: Boolean) {
+        val page = tvStack.lastOrNull() ?: return
+        val item = page.items.getOrNull(index) ?: return
+        if (item.isPlayable) {
+            val episodes = page.items.filter { it.isPlayable }
+            val i = episodes.indexOf(item).coerceAtLeast(0)
+            val start = if (fromStart) 0L else item.viewOffsetMs
+            playQueue(episodes.map { plex.toMediaItem(it, Kind.VIDEO) }, i, start)
+            return
+        }
+        val path = item.browsePath ?: return
+        viewModelScope.launch {
+            plexBusy = true
+            try {
+                val items = plex.browse(path)
+                tvStack = tvStack + PlexPage(item.title, items)
+                announce("${item.title}. ${items.size} items.")
+            } catch (e: Exception) {
+                announce("Could not open ${item.title}. ${e.message ?: ""}")
+            } finally {
+                plexBusy = false
+            }
+        }
+    }
+
+    fun tvBack() {
+        if (tvStack.isNotEmpty()) {
+            tvStack = tvStack.dropLast(1)
+            announce(tvStack.lastOrNull()?.title ?: "TV shows")
+        }
+    }
+
+    // ---------- Audiobooks ----------
+
+    fun bookResume(b: Book): ResumePoint? = store.resume("book:${b.id}")
+
+    fun bookmarks(bookId: String): List<Bookmark> = store.bookmarks(bookId)
+
+    fun playBook(b: Book, fromStart: Boolean = false) {
+        val r = if (fromStart) null else bookResume(b)
+        playBookAt(b, r?.index ?: 0, r?.positionMs ?: 0L)
+    }
+
+    fun playBookAt(b: Book, part: Int, positionMs: Long) {
+        val items = b.parts.mapIndexed { i, p ->
+            buildMediaItem(
+                id = "book:${b.id}#$i",
+                uri = p.uri,
+                title = if (b.parts.size > 1) p.title else b.title,
+                artist = b.author,
+                album = b.title,
+                kind = Kind.AUDIOBOOK,
+                bookId = b.id,
+                part = i
+            )
+        }
+        controller?.shuffleModeEnabled = false
+        playQueue(items, part, positionMs, store.audiobookSpeed)
+    }
+
+    fun addBookmark() {
+        val c = controller ?: return
+        val bookId = currentBookId ?: return
+        val pos = c.currentPosition.coerceAtLeast(0)
+        val book = books.find { it.id == bookId }
+        val label = buildString {
+            if ((book?.parts?.size ?: 1) > 1) append("Chapter ${currentPart + 1}, ")
+            append(spokenTime(pos))
+        }
+        store.addBookmark(bookId, Bookmark(System.currentTimeMillis(), currentPart, pos, label))
+        bookmarkVersion++
+        announce("Bookmark added at $label.")
+    }
+
+    fun playBookmark(b: Book, m: Bookmark) = playBookAt(b, m.index, m.positionMs)
+
+    fun deleteBookmark(b: Book, m: Bookmark) {
+        store.deleteBookmark(b.id, m.id)
+        bookmarkVersion++
+        announce("Bookmark deleted.")
+    }
+
+    fun addBookFiles(uris: List<Uri>) {
+        val resolver = appContext.contentResolver
+        val added = uris.mapNotNull { uri ->
+            try {
+                resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: SecurityException) {
+                // Some file pickers don't allow lasting access; the file may only open until restart.
+            }
+            uri.toString()
+        }
+        store.addedBooks = store.addedBooks + added
+        reloadBooks()
+        announce(if (added.size == 1) "Audiobook added." else "${added.size} audiobooks added.")
+    }
+
+    fun removeAddedBook(b: Book) {
+        if (!b.added) return
+        val uri = b.id.removePrefix("doc:")
+        store.addedBooks = store.addedBooks - uri
+        reloadBooks()
+        announce("${b.title} removed from the list. The file was not deleted.")
     }
 
     // ---------- Tag editor ----------
@@ -345,7 +704,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         loadLocal()
     }
 
-    // ---------- Plex ----------
+    // ---------- Plex account ----------
 
     fun startPlexSignIn(openUrl: (String) -> Unit) {
         signInJob?.cancel()
@@ -369,6 +728,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 plexWaitingForBrowser = false
                 announce("Plex sign in timed out. Please try again.")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 plexWaitingForBrowser = false
                 announce("Could not start Plex sign in. ${e.message ?: ""}")
@@ -407,10 +768,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             announce("Connecting to ${server.name}.")
             try {
                 plex.connect(server)
-                val items = plex.sections()
-                plexStack = listOf(PlexPage(server.name, items))
                 plexConnected = true
-                announce("Connected to ${server.name}. ${items.size} libraries.")
+                plexServerName = server.name
+                announce("Connected to ${server.name}. Loading your library.")
+                loadPlexLibrary()
             } catch (e: Exception) {
                 announce(e.message ?: "Could not connect to ${server.name}.")
             } finally {
@@ -424,65 +785,60 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             loadPlexServers()
             return
         }
-        viewModelScope.launch {
-            plexBusy = true
-            try {
-                val items = plex.sections()
-                plexStack = listOf(PlexPage(plex.savedServerName.ifBlank { "Plex" }, items))
-                plexConnected = true
-            } catch (e: Exception) {
-                plex.forgetServer()
-                loadPlexServers()
-            } finally {
-                plexBusy = false
-            }
-        }
+        plexConnected = true
+        plexServerName = plex.savedServerName.ifBlank { "Plex" }
+        loadPlexLibrary()
     }
 
-    fun openPlexItem(index: Int) {
-        val page = plexStack.lastOrNull() ?: return
-        val item = page.items.getOrNull(index) ?: return
-        if (item.isPlayable) {
-            val playable = page.items.filter { it.isPlayable }
-            playQueue(playable.map { plex.toMediaItem(it) }, playable.indexOf(item).coerceAtLeast(0))
-            return
-        }
-        val path = item.browsePath ?: return
-        viewModelScope.launch {
-            plexBusy = true
+    /** Loads every song, movie and TV show from the Plex server. */
+    fun loadPlexLibrary() {
+        if (!plexConnected) return
+        libraryJob?.cancel()
+        libraryJob = viewModelScope.launch {
+            plexLoading = true
             try {
-                val items = plex.browse(path)
-                plexStack = plexStack + PlexPage(item.title, items)
-                announce("${item.title}. ${items.size} items.")
+                val sections = plex.librarySections()
+                val songs = plex.allTracks(sections).filter { it.isPlayable }.map { it.toSong() }
+                val movies = plex.movies(sections)
+                val shows = plex.shows(sections)
+                plexSongs = songs
+                plexMovies = movies
+                plexShows = shows
+                announce("Plex library loaded. ${songs.size} songs, ${movies.size} movies, ${shows.size} TV shows.")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                announce("Could not open ${item.title}. ${e.message ?: ""}")
+                announce("Could not load your Plex library. ${e.message ?: ""}")
             } finally {
-                plexBusy = false
+                plexLoading = false
             }
-        }
-    }
-
-    fun plexBack() {
-        if (plexStack.size > 1) {
-            plexStack = plexStack.dropLast(1)
-            announce(plexStack.last().title)
         }
     }
 
     fun plexChangeServer() {
+        libraryJob?.cancel()
         plex.forgetServer()
-        plexConnected = false
-        plexStack = emptyList()
+        clearPlexLibrary()
         loadPlexServers()
     }
 
     fun plexSignOut() {
         signInJob?.cancel()
+        libraryJob?.cancel()
         plex.signOut()
         plexSignedIn = false
-        plexConnected = false
         plexServers = emptyList()
-        plexStack = emptyList()
+        clearPlexLibrary()
         announce("Signed out of Plex.")
+    }
+
+    private fun clearPlexLibrary() {
+        plexConnected = false
+        plexServerName = ""
+        plexSongs = emptyList()
+        plexMovies = emptyList()
+        plexShows = emptyList()
+        tvStack = emptyList()
+        continueWatching = continueWatching.filter { it.local != null }
     }
 }

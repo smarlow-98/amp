@@ -45,4 +45,4 @@ jobs:
           gh release create android-latest AMP-android.apk \
             --title "AMP for Android (latest build)" \
             --notes "Built from commit ${GITHUB_SHA::7}. Download AMP-android.apk below." \
-            --prerelease
+            --latest
