@@ -46,7 +46,8 @@ data class PlexItem(
     val year: String = "",
     val viewOffsetMs: Long = 0,
     val viewCount: Int = 0,
-    val lastViewedAt: Long = 0
+    val lastViewedAt: Long = 0,
+    val addedAt: Long = 0
 ) {
     val isPlayable: Boolean get() = partKey != null
     val isVideo: Boolean get() = type == "movie" || type == "episode" || type == "clip"
@@ -294,7 +295,7 @@ class PlexClient(context: Context) {
             key.startsWith("/") -> key
             else -> parentPath.substringBefore('?').trimEnd('/') + "/" + key
         }
-        val year = m.str("year")
+        val year = m.str("year").ifBlank { m.str("parentYear") }
         val subtitle = when (type) {
             "track" -> listOf(m.str("originalTitle").ifBlank { m.str("grandparentTitle") }, m.str("parentTitle"))
                 .filter { it.isNotBlank() }.joinToString(", ")
@@ -331,7 +332,8 @@ class PlexClient(context: Context) {
             year = year,
             viewOffsetMs = m.optLong("viewOffset", 0L),
             viewCount = m.optInt("viewCount", 0),
-            lastViewedAt = m.optLong("lastViewedAt", 0L) * 1000
+            lastViewedAt = m.optLong("lastViewedAt", 0L) * 1000,
+            addedAt = m.optLong("addedAt", 0L) * 1000
         )
     }
 

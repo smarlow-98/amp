@@ -17,7 +17,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
@@ -44,13 +46,18 @@ fun VideosScreen(vm: AppViewModel) {
                 Tab(selected = section == i, onClick = { section = i }, text = { Text(label) })
             }
         }
-        when (section) {
-            0 -> ContinueList(vm)
-            1 -> MovieList(vm)
-            2 -> TvBrowser(vm)
-            else -> {
-                PermissionPrompt(perm)
-                PhoneVideoList(vm)
+        // Keeps your place in each list while you switch tabs or open a show.
+        val holder = rememberSaveableStateHolder()
+        val tvKey = "${vm.tvStack.size}:${vm.tvStack.lastOrNull()?.title ?: ""}"
+        holder.SaveableStateProvider(if (section == 2) "tv:$tvKey" else "section:$section") {
+            when (section) {
+                0 -> ContinueList(vm)
+                1 -> MovieList(vm)
+                2 -> TvBrowser(vm)
+                else -> {
+                    PermissionPrompt(perm)
+                    PhoneVideoList(vm)
+                }
             }
         }
     }
@@ -98,9 +105,11 @@ private fun ColumnScope.MovieList(vm: AppViewModel) {
         return
     }
     if (vm.plexLoading && vm.plexMovies.isEmpty()) Text("Loading your movies.", Modifier.padding(16.dp))
-    else if (vm.plexMovies.isEmpty()) Text("No movies were found on your Plex server.", Modifier.padding(16.dp))
+    else if (vm.plexMovies.isEmpty()) Text("No movies were found on your Plex servers.", Modifier.padding(16.dp))
+    SortMenu(MovieSort.entries, vm.movieSort, { it.label }, vm::changeMovieSort)
+    val movies = remember(vm.plexMovies, vm.movieSort) { sortMovies(vm.plexMovies, vm.movieSort) }
     LazyColumn(Modifier.weight(1f)) {
-        itemsIndexed(vm.plexMovies, key = { i, m -> "$i:${m.ratingKey}" }) { _, m ->
+        itemsIndexed(movies, key = { _, m -> m.uid }) { _, m ->
             PlexVideoRow(m, kind = "movie", extra = m.year, onPlay = { vm.playPlexVideo(m, it) })
         }
     }

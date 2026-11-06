@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -40,15 +41,19 @@ fun MusicScreen(vm: AppViewModel) {
     var openAlbum by rememberSaveable { mutableStateOf<String?>(null) }
     var openArtist by rememberSaveable { mutableStateOf<String?>(null) }
 
-    val songs = remember(vm.localSongs, vm.plexSongs, source) {
+    val all = remember(vm.localSongs, vm.plexSongs, source) {
         when (source) {
             1 -> vm.localSongs
             2 -> vm.plexSongs
             else -> vm.localSongs + vm.plexSongs
-        }.sortedBy { it.title.lowercase() }
+        }
     }
-    val albums = remember(songs) { groupAlbums(songs) }
-    val artists = remember(songs) { groupArtists(songs) }
+    val songs = remember(all, vm.songSort) { sortSongs(all, vm.songSort) }
+    val albums = remember(all, vm.albumSort) { sortAlbums(groupAlbums(all), vm.albumSort) }
+    val artists = remember(all, vm.artistSort) { sortArtists(groupArtists(all), vm.artistSort) }
+
+    // Keeps your place in each list while you open an album or go to another tab.
+    val holder = rememberSaveableStateHolder()
 
     val album = openAlbum?.let { k -> albums.find { it.key == k } }
     val artist = openArtist?.let { k -> artists.find { it.key == k } }
@@ -59,11 +64,15 @@ fun MusicScreen(vm: AppViewModel) {
     }
 
     if (album != null) {
-        SongListPage(vm, album.title, "by ${album.artist}, ${album.songs.size} songs", album.songs) { openAlbum = null }
+        holder.SaveableStateProvider("album:${album.key}") {
+            SongListPage(vm, album.title, "by ${album.artist}, ${album.songs.size} songs", album.songs) { openAlbum = null }
+        }
         return
     }
     if (artist != null) {
-        SongListPage(vm, artist.name, "${artist.songs.size} songs", artist.songs) { openArtist = null }
+        holder.SaveableStateProvider("artist:${artist.key}") {
+            SongListPage(vm, artist.name, "${artist.songs.size} songs", artist.songs) { openArtist = null }
+        }
         return
     }
 
@@ -107,7 +116,14 @@ fun MusicScreen(vm: AppViewModel) {
             Text("Loading music on this phone.", Modifier.padding(horizontal = 16.dp))
         }
 
+        when (section) {
+            0 -> SortMenu(SongSort.entries, vm.songSort, { it.label }, vm::changeSongSort)
+            1 -> SortMenu(AlbumSort.entries, vm.albumSort, { it.label }, vm::changeAlbumSort)
+            else -> SortMenu(ArtistSort.entries, vm.artistSort, { it.label }, vm::changeArtistSort)
+        }
+
         val q = query.trim()
+        holder.SaveableStateProvider("section:$section") {
         when (section) {
             0 -> {
                 val list = remember(songs, q) {
@@ -173,6 +189,7 @@ fun MusicScreen(vm: AppViewModel) {
                     }
                 }
             }
+        }
         }
     }
 }

@@ -26,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -68,6 +69,8 @@ fun AmpApp(vm: AppViewModel = viewModel()) {
     }
 
     val editing = vm.tagEdit != null
+    // Remembers each tab's scroll position and choices while you're on another tab.
+    val holder = rememberSaveableStateHolder()
 
     Scaffold(
         bottomBar = {
@@ -86,13 +89,18 @@ fun AmpApp(vm: AppViewModel = viewModel()) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            when {
-                editing -> TagEditorScreen(vm)
-                tab == 0 -> MusicScreen(vm)
-                tab == 1 -> VideosScreen(vm)
-                tab == 2 -> AudiobooksScreen(vm)
-                tab == 3 -> NowPlayingScreen(vm)
-                else -> SettingsScreen(vm)
+            if (editing) {
+                TagEditorScreen(vm)
+            } else {
+                holder.SaveableStateProvider("tab:$tab") {
+                    when (tab) {
+                        0 -> MusicScreen(vm)
+                        1 -> VideosScreen(vm)
+                        2 -> AudiobooksScreen(vm)
+                        3 -> NowPlayingScreen(vm)
+                        else -> SettingsScreen(vm)
+                    }
+                }
             }
         }
     }

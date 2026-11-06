@@ -77,6 +77,12 @@ class AppStore(context: Context) {
             prefs.edit().putStringSet("addedBooks", value).apply()
         }
 
+    fun sort(key: String, default: String): String = prefs.getString("sort:$key", null) ?: default
+
+    fun setSort(key: String, value: String) {
+        prefs.edit().putString("sort:$key", value).apply()
+    }
+
     var audiobookSpeed: Float
         get() = prefs.getFloat("bookSpeed", 1f)
         set(value) {

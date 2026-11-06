@@ -22,10 +22,16 @@ data class Song(
     val source: Source,
     val uri: Uri?,
     val isMp3: Boolean,
-    val plex: PlexItem?
+    val plex: PlexItem?,
+    val year: Int = 0,
+    /** When the song was added to the library, in milliseconds. */
+    val addedAt: Long = 0
 )
 
-data class Album(val key: String, val title: String, val artist: String, val songs: List<Song>)
+data class Album(val key: String, val title: String, val artist: String, val songs: List<Song>) {
+    val year: Int get() = songs.maxOfOrNull { it.year } ?: 0
+    val addedAt: Long get() = songs.maxOfOrNull { it.addedAt } ?: 0
+}
 data class ArtistGroup(val key: String, val name: String, val songs: List<Song>)
 
 data class LocalVideo(val uri: Uri, val title: String, val durationMs: Long)
@@ -83,7 +89,9 @@ fun PlexItem.toSong() = Song(
     source = Source.PLEX,
     uri = null,
     isMp3 = false,
-    plex = this
+    plex = this,
+    year = year.toIntOrNull() ?: 0,
+    addedAt = addedAt
 )
 
 object LocalLibrary {
@@ -97,7 +105,9 @@ object LocalLibrary {
 
     fun loadSongs(context: Context): List<Song> {
         val collection = audioUri
-        val projection = arrayOf("_id", "title", "artist", "album", "album_artist", "duration", "mime_type", "track")
+        val projection = arrayOf(
+            "_id", "title", "artist", "album", "album_artist", "duration", "mime_type", "track", "year", "date_added"
+        )
         val result = mutableListOf<Song>()
         context.contentResolver.query(
             collection, projection,
@@ -112,6 +122,8 @@ object LocalLibrary {
             val durCol = c.getColumnIndexOrThrow("duration")
             val mimeCol = c.getColumnIndexOrThrow("mime_type")
             val trackCol = c.getColumnIndex("track")
+            val yearCol = c.getColumnIndex("year")
+            val addedCol = c.getColumnIndex("date_added")
             while (c.moveToNext()) {
                 val uri = ContentUris.withAppendedId(collection, c.getLong(idCol))
                 val artist = clean(c.getString(artistCol), "Unknown artist")
@@ -130,7 +142,9 @@ object LocalLibrary {
                     source = Source.PHONE,
                     uri = uri,
                     isMp3 = mime == "audio/mpeg" || mime == "audio/mp3",
-                    plex = null
+                    plex = null,
+                    year = if (yearCol >= 0) c.getInt(yearCol) else 0,
+                    addedAt = if (addedCol >= 0) c.getLong(addedCol) * 1000 else 0
                 )
             }
         }

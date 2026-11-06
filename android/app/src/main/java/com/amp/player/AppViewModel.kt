@@ -444,22 +444,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Source.PLEX -> plex.toMediaItem(s.plex!!, Kind.MUSIC)
     }
 
-    /** Plays a list of songs. Very long lists are trimmed to the 500 songs around your choice. */
+    /** Plays a whole list of songs, starting at the one you picked. */
     fun playSongs(list: List<Song>, index: Int) {
         if (list.isEmpty()) return
-        val i = index.coerceIn(0, list.lastIndex)
-        val from = (i - 200).coerceAtLeast(0)
-        val to = (i + 300).coerceAtMost(list.size)
         controller?.shuffleModeEnabled = false
-        playQueue(list.subList(from, to).map(::songItem), i - from)
+        playQueue(list.map(::songItem), index.coerceIn(0, list.lastIndex))
     }
 
+    /** Shuffles every song in the list, with no limit. */
     fun shuffleSongs(list: List<Song>) {
         if (list.isEmpty()) return
-        val picked = list.shuffled().take(500)
-        playQueue(picked.map(::songItem), 0)
-        announce("Shuffling ${picked.size} songs.")
+        controller?.shuffleModeEnabled = false
+        playQueue(list.shuffled().map(::songItem), 0)
+        announce("Shuffling ${list.size} songs.")
     }
+
+    // ---------- Sorting ----------
+
+    var songSort by mutableStateOf(enumOrDefault(store.sort("songs", ""), SongSort.TITLE))
+        private set
+    var albumSort by mutableStateOf(enumOrDefault(store.sort("albums", ""), AlbumSort.TITLE))
+        private set
+    var artistSort by mutableStateOf(enumOrDefault(store.sort("artists", ""), ArtistSort.NAME))
+        private set
+    var movieSort by mutableStateOf(enumOrDefault(store.sort("movies", ""), MovieSort.TITLE))
+        private set
+
+    fun changeSongSort(s: SongSort) { songSort = s; store.setSort("songs", s.name); announce("Sorted by ${s.label}.") }
+    fun changeAlbumSort(s: AlbumSort) { albumSort = s; store.setSort("albums", s.name); announce("Sorted by ${s.label}.") }
+    fun changeArtistSort(s: ArtistSort) { artistSort = s; store.setSort("artists", s.name); announce("Sorted by ${s.label}.") }
+    fun changeMovieSort(s: MovieSort) { movieSort = s; store.setSort("movies", s.name); announce("Sorted by ${s.label}.") }
 
     // ---------- Videos ----------
 
